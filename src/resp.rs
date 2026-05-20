@@ -108,7 +108,27 @@ pub fn decode_one(data: &[u8]) -> Result<(RespValue, &[u8]), RespError> {
             ))
         }
 
-        b'*' => todo!("array"),
+        b'*' => {
+            let (len, mut remaining) = parse_i64_line(&rest)?;
+
+            if len == -1 {
+                return Ok((RespValue::Array(None), remaining));
+            }
+
+            if len < 0 {
+                return Err(RespError::InvalidLength);
+            }
+
+            let mut values = Vec::with_capacity(len as usize);
+
+            for _ in 0..len {
+                let (value, rest) = decode_one(remaining)?;
+                values.push(value);
+                remaining = rest;
+            }
+
+            Ok((RespValue::Array(Some(values)), remaining))
+        }
 
         other => Err(RespError::UnknownTypeMarker(other)),
     }
