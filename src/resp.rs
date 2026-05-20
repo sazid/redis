@@ -45,14 +45,54 @@ pub enum RespError {
 /// This should fail with `RespError::TrailingData` if a valid value is followed
 /// by extra bytes. For parsing one value from a larger buffer, use `decode_one`.
 pub fn decode(data: &[u8]) -> Result<RespValue, RespError> {
-    todo!("parse exactly one RESP value")
+    let (value, remaining) = decode_one(data)?;
+
+    if remaining.is_empty() {
+        Ok(value)
+    } else {
+        Err(RespError::TrailingData)
+    }
 }
 
 /// Parse one RESP value from the beginning of `data`.
 ///
 /// Return the parsed value plus the remaining unconsumed bytes.
 pub fn decode_one(data: &[u8]) -> Result<(RespValue, &[u8]), RespError> {
-    todo!("parse one RESP value and return the remaining bytes")
+    let Some((&marker, rest)) = data.split_first() else {
+        return Err(RespError::EmptyInput);
+    };
+
+    match marker {
+        b'+' => {
+            let (value, remaining) = parse_utf8_line(rest)?;
+
+            Ok((RespValue::SimpleString(value.to_owned()), remaining))
+        }
+
+        b'-' => {
+            let (value, remaining) = parse_utf8_line(rest)?;
+
+            Ok((RespValue::Error(value.to_owned()), remaining))
+        }
+
+        b':' => {
+            let (line, remaining) = parse_utf8_line(rest)?;
+            let value = line.parse::<i64>().map_err(|_| RespError::InvalidInteger)?;
+
+            Ok((RespValue::Integer(value), remaining))
+        }
+
+        b'$' => todo!("bulk string"),
+        b'*' => todo!("array"),
+
+        other => Err(RespError::UnknownTypeMarker(other)),
+    }
+}
+
+fn parse_utf8_line(data: &[u8]) -> Result<(&str, &[u8]), RespError> {
+    let (line, remaining) = read_line(data)?;
+    let value = str::from_utf8(line).map_err(|_| RespError::InvalidUtf8)?;
+    Ok((value, remaining))
 }
 
 /// Read bytes until `\r\n`.
