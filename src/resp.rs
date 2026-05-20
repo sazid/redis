@@ -65,33 +65,64 @@ pub fn decode_one(data: &[u8]) -> Result<(RespValue, &[u8]), RespError> {
     match marker {
         b'+' => {
             let (value, remaining) = parse_utf8_line(rest)?;
-
             Ok((RespValue::SimpleString(value.to_owned()), remaining))
         }
 
         b'-' => {
             let (value, remaining) = parse_utf8_line(rest)?;
-
             Ok((RespValue::Error(value.to_owned()), remaining))
         }
 
         b':' => {
-            let (line, remaining) = parse_utf8_line(rest)?;
-            let value = line.parse::<i64>().map_err(|_| RespError::InvalidInteger)?;
-
+            let (value, remaining) = parse_i64_line(rest)?;
             Ok((RespValue::Integer(value), remaining))
         }
 
-        b'$' => todo!("bulk string"),
+        b'$' => {
+            let (len, remaining) = parse_i64_line(rest)?;
+
+            if len == -1 {
+                return Ok((RespValue::BulkString(None), remaining));
+            }
+
+            if len < 0 {
+                return Err(RespError::InvalidLength);
+            }
+
+            let len = len as usize;
+
+            // Need payload bytes plus trailing CRLF.
+            if remaining.len() < len + 2 {
+                return Err(RespError::IncompleteInput);
+            }
+
+            let (payload, after_payload) = remaining.split_at(len);
+
+            if !after_payload.starts_with(b"\r\n") {
+                return Err(RespError::MissingCrlf);
+            }
+
+            Ok((
+                RespValue::BulkString(Some(payload.to_vec())),
+                &after_payload[2..],
+            ))
+        }
+
         b'*' => todo!("array"),
 
         other => Err(RespError::UnknownTypeMarker(other)),
     }
 }
 
+fn parse_i64_line(data: &[u8]) -> Result<(i64, &[u8]), RespError> {
+    let (line, remaining) = parse_utf8_line(data)?;
+    let value = line.parse().map_err(|_| RespError::InvalidInteger)?;
+    Ok((value, remaining))
+}
+
 fn parse_utf8_line(data: &[u8]) -> Result<(&str, &[u8]), RespError> {
     let (line, remaining) = read_line(data)?;
-    let value = str::from_utf8(line).map_err(|_| RespError::InvalidUtf8)?;
+    let value = std::str::from_utf8(line).map_err(|_| RespError::InvalidUtf8)?;
     Ok((value, remaining))
 }
 
