@@ -1,1 +1,209 @@
+//! RESP (Redis Serialization Protocol) value types and parser scaffolding.
+//!
+//! Implement the parser piece-by-piece and use the tests at the bottom of this
+//! file to guide you.
 
+/// A parsed RESP2 value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RespValue {
+    /// `+OK\r\n`
+    SimpleString(String),
+
+    /// `-ERR something went wrong\r\n`
+    Error(String),
+
+    /// `:123\r\n`
+    Integer(i64),
+
+    /// `$5\r\nhello\r\n` or `$-1\r\n`
+    ///
+    /// RESP bulk strings are binary-safe, so store bytes instead of `String`.
+    /// `None` means a null bulk string.
+    BulkString(Option<Vec<u8>>),
+
+    /// `*2\r\n$4\r\nPING\r\n$4\r\ntest\r\n` or `*-1\r\n`
+    ///
+    /// `None` means a null array.
+    Array(Option<Vec<RespValue>>),
+}
+
+/// Things that can go wrong while parsing RESP data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RespError {
+    EmptyInput,
+    UnknownTypeMarker(u8),
+    MissingCrlf,
+    InvalidUtf8,
+    InvalidInteger,
+    InvalidLength,
+    IncompleteInput,
+    TrailingData,
+}
+
+/// Parse exactly one RESP value.
+///
+/// This should fail with `RespError::TrailingData` if a valid value is followed
+/// by extra bytes. For parsing one value from a larger buffer, use `decode_one`.
+pub fn decode(data: &[u8]) -> Result<RespValue, RespError> {
+    todo!("parse exactly one RESP value")
+}
+
+/// Parse one RESP value from the beginning of `data`.
+///
+/// Return the parsed value plus the remaining unconsumed bytes.
+pub fn decode_one(data: &[u8]) -> Result<(RespValue, &[u8]), RespError> {
+    todo!("parse one RESP value and return the remaining bytes")
+}
+
+/// Read bytes until `\r\n`.
+///
+/// Return the line without `\r\n`, plus the bytes after the line ending.
+fn read_line(data: &[u8]) -> Result<(&[u8], &[u8]), RespError> {
+    let crlf_index = data
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .ok_or(RespError::MissingCrlf)?;
+
+    Ok((&data[..crlf_index], &data[crlf_index + 2..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_line_returns_line_without_crlf_and_remaining_bytes() {
+        let ans = read_line(b"OK\r\nextra");
+        assert_eq!(ans, Ok((&b"OK"[..], &b"extra"[..])));
+    }
+
+    #[test]
+    fn read_line_fails_when_crlf_is_missing() {
+        assert_eq!(read_line(b"OK"), Err(RespError::MissingCrlf));
+    }
+
+    #[test]
+    fn decode_fails_on_empty_input() {
+        assert_eq!(decode(b""), Err(RespError::EmptyInput));
+    }
+
+    #[test]
+    fn decode_fails_on_unknown_type_marker() {
+        assert_eq!(decode(b"?wat\r\n"), Err(RespError::UnknownTypeMarker(b'?')));
+    }
+
+    #[test]
+    fn decodes_simple_string() {
+        assert_eq!(
+            decode(b"+OK\r\n"),
+            Ok(RespValue::SimpleString("OK".to_owned()))
+        );
+    }
+
+    #[test]
+    fn decodes_error() {
+        assert_eq!(
+            decode(b"-ERR unknown command\r\n"),
+            Ok(RespValue::Error("ERR unknown command".to_owned()))
+        );
+    }
+
+    #[test]
+    fn decodes_positive_integer() {
+        assert_eq!(decode(b":123\r\n"), Ok(RespValue::Integer(123)));
+    }
+
+    #[test]
+    fn decodes_negative_integer() {
+        assert_eq!(decode(b":-42\r\n"), Ok(RespValue::Integer(-42)));
+    }
+
+    #[test]
+    fn integer_fails_when_not_a_number() {
+        assert_eq!(decode(b":abc\r\n"), Err(RespError::InvalidInteger));
+    }
+
+    #[test]
+    fn decodes_bulk_string() {
+        assert_eq!(
+            decode(b"$5\r\nhello\r\n"),
+            Ok(RespValue::BulkString(Some(b"hello".to_vec())))
+        );
+    }
+
+    #[test]
+    fn decodes_empty_bulk_string() {
+        assert_eq!(
+            decode(b"$0\r\n\r\n"),
+            Ok(RespValue::BulkString(Some(Vec::new())))
+        );
+    }
+
+    #[test]
+    fn decodes_null_bulk_string() {
+        assert_eq!(decode(b"$-1\r\n"), Ok(RespValue::BulkString(None)));
+    }
+
+    #[test]
+    fn bulk_string_fails_when_length_is_negative_but_not_null() {
+        assert_eq!(decode(b"$-2\r\n"), Err(RespError::InvalidLength));
+    }
+
+    #[test]
+    fn bulk_string_fails_when_payload_is_shorter_than_declared() {
+        assert_eq!(decode(b"$5\r\nhel\r\n"), Err(RespError::IncompleteInput));
+    }
+
+    #[test]
+    fn bulk_string_fails_when_payload_is_not_followed_by_crlf() {
+        assert_eq!(decode(b"$5\r\nhelloXX"), Err(RespError::MissingCrlf));
+    }
+
+    #[test]
+    fn decodes_empty_array() {
+        assert_eq!(decode(b"*0\r\n"), Ok(RespValue::Array(Some(vec![]))));
+    }
+
+    #[test]
+    fn decodes_null_array() {
+        assert_eq!(decode(b"*-1\r\n"), Ok(RespValue::Array(None)));
+    }
+
+    #[test]
+    fn decodes_array_of_bulk_strings() {
+        assert_eq!(
+            decode(b"*2\r\n$4\r\nPING\r\n$4\r\ntest\r\n"),
+            Ok(RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"PING".to_vec())),
+                RespValue::BulkString(Some(b"test".to_vec())),
+            ])))
+        );
+    }
+
+    #[test]
+    fn decodes_nested_array() {
+        assert_eq!(
+            decode(b"*2\r\n:1\r\n*2\r\n+OK\r\n$3\r\nhey\r\n"),
+            Ok(RespValue::Array(Some(vec![
+                RespValue::Integer(1),
+                RespValue::Array(Some(vec![
+                    RespValue::SimpleString("OK".to_owned()),
+                    RespValue::BulkString(Some(b"hey".to_vec())),
+                ])),
+            ])))
+        );
+    }
+
+    #[test]
+    fn decode_one_returns_remaining_bytes() {
+        assert_eq!(
+            decode_one(b"+OK\r\n:123\r\n"),
+            Ok((RespValue::SimpleString("OK".to_owned()), &b":123\r\n"[..]))
+        );
+    }
+
+    #[test]
+    fn decode_fails_when_valid_value_has_trailing_data() {
+        assert_eq!(decode(b"+OK\r\n:123\r\n"), Err(RespError::TrailingData));
+    }
+}
