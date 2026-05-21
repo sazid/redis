@@ -1,14 +1,6 @@
-mod config;
-mod resp;
+pub mod config;
+pub mod resp;
+pub mod server;
 
 use clap::Parser;
 use config::Config;
-
-pub fn run() {
-    let config = Config::parse();
-
-    let host = config.host;
-    let port = config.port;
-    println!("Host: {host}");
-    println!("Host: {port}");
-}
