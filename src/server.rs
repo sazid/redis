@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 
 use mio::net::{TcpListener, TcpStream};
@@ -7,7 +7,7 @@ use mio::{Events, Interest, Poll, Token};
 use slab::Slab;
 
 use crate::config::Config;
-use crate::resp::{self, RespError};
+use crate::resp::{self, RespError, RespValue};
 
 const SERVER: Token = Token(0);
 
@@ -88,39 +88,55 @@ pub fn run(config: Config) -> std::io::Result<()> {
                     let Some(client) = clients.get_mut(key) else {
                         continue;
                     };
-                    let mut buf = [0u8; 4096];
 
-                    loop {
-                        match client.socket.read(&mut buf) {
-                            Ok(0) => {
-                                disconnected = true;
-                                break;
-                            }
+                    if event.is_readable() {
+                        let mut buf = [0u8; 4096];
 
-                            Ok(n) => {
-                                client.read_buf.extend_from_slice(&buf[..n]);
+                        loop {
+                            match client.socket.read(&mut buf) {
+                                Ok(0) => {
+                                    disconnected = true;
+                                    break;
+                                }
 
-                                println!(
-                                    "Received from {token:?}: {:?}",
-                                    String::from_utf8_lossy(&buf[..n]),
-                                );
+                                Ok(n) => {
+                                    client.read_buf.extend_from_slice(&buf[..n]);
 
-                                if !process_client_buffer(client, token) {
+                                    println!(
+                                        "Received from {token:?}: {:?}",
+                                        String::from_utf8_lossy(&buf[..n]),
+                                    );
+
+                                    if !process_client_buffer(client, token) {
+                                        disconnected = true;
+                                        break;
+                                    }
+                                }
+
+                                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                                    break;
+                                }
+
+                                Err(err) => {
+                                    eprintln!("read error from {token:?}: {err}");
                                     disconnected = true;
                                     break;
                                 }
                             }
-
-                            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                                break;
-                            }
-
-                            Err(err) => {
-                                eprintln!("read error from {token:?}: {err}");
-                                disconnected = true;
-                                break;
-                            }
                         }
+                    }
+
+                    if !disconnected && event.is_writable() {
+                        if !flush_client_write_buffer(client, token)? {
+                            disconnected = true;
+                        }
+                    }
+
+                    if !disconnected {
+                        let interest = client_interest(!client.write_buf.is_empty());
+
+                        poll.registry()
+                            .reregister(&mut client.socket, token, interest)?;
                     }
 
                     if disconnected {
@@ -145,6 +161,9 @@ fn process_client_buffer(client: &mut Client, token: Token) -> bool {
 
                 println!("Parsed from {token:?}: {value:?}");
 
+                let response = handle_request(value);
+                client.write_buf.extend_from_slice(&response.encode());
+
                 client.read_buf.drain(..consumed);
             }
 
@@ -158,4 +177,74 @@ fn process_client_buffer(client: &mut Client, token: Token) -> bool {
     }
 
     true
+}
+
+fn handle_request(value: RespValue) -> RespValue {
+    let RespValue::Array(Some(items)) = value else {
+        return RespValue::Error("ERR expected array command".to_owned());
+    };
+
+    if items.is_empty() {
+        return RespValue::Error("ERR empty command".to_owned());
+    }
+
+    let Some(command_name) = value_as_bytes(&items[0]) else {
+        return RespValue::Error("ERR command name must be a bulk string".to_owned());
+    };
+
+    if command_name.eq_ignore_ascii_case(b"PING") {
+        handle_ping(&items)
+    } else {
+        RespValue::Error("ERR unknown command".to_owned())
+    }
+}
+
+fn value_as_bytes(value: &RespValue) -> Option<&[u8]> {
+    match value {
+        RespValue::BulkString(Some(bytes)) => Some(bytes),
+        RespValue::SimpleString(value) => Some(value.as_bytes()),
+        _ => None,
+    }
+}
+
+fn handle_ping(items: &[RespValue]) -> RespValue {
+    match items {
+        [_command] => RespValue::SimpleString("PONG".to_owned()),
+
+        [_command, message] => {
+            let Some(bytes) = value_as_bytes(message) else {
+                return RespValue::Error("ERR invalid PING argument".to_owned());
+            };
+
+            RespValue::BulkString(Some(bytes.to_vec()))
+        }
+
+        _ => RespValue::Error("ERR wrong number of arguments for 'ping' command".to_owned()),
+    }
+}
+
+fn client_interest(has_pending_writes: bool) -> Interest {
+    if has_pending_writes {
+        Interest::READABLE.add(Interest::WRITABLE)
+    } else {
+        Interest::READABLE
+    }
+}
+
+fn flush_client_write_buffer(client: &mut Client, token: Token) -> io::Result<bool> {
+    while !client.write_buf.is_empty() {
+        match client.socket.write(&client.write_buf) {
+            Ok(0) => return Ok(false),
+            Ok(n) => {
+                client.write_buf.drain(..n);
+            }
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(true),
+            Err(err) => {
+                eprintln!("write error to {token:?}: {err}");
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(true)
 }
