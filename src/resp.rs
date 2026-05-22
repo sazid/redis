@@ -298,3 +298,82 @@ mod tests {
         assert_eq!(decode(b"+OK\r\n:123\r\n"), Err(RespError::TrailingData));
     }
 }
+
+impl RespValue {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out);
+        out
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        match self {
+            RespValue::SimpleString(value) => {
+                out.extend_from_slice(b"+");
+                out.extend_from_slice(value.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+
+            RespValue::Error(value) => {
+                out.extend_from_slice(b"-");
+                out.extend_from_slice(value.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+
+            RespValue::Integer(value) => {
+                out.extend_from_slice(b":");
+                out.extend_from_slice(value.to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+
+            RespValue::BulkString(Some(bytes)) => {
+                out.extend_from_slice(b"$");
+                out.extend_from_slice(bytes.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+
+                out.extend_from_slice(bytes);
+                out.extend_from_slice(b"\r\n");
+            }
+            RespValue::BulkString(None) => {
+                out.extend_from_slice(b"$-1\r\n");
+            }
+
+            RespValue::Array(Some(values)) => {
+                out.extend_from_slice(b"*");
+                out.extend_from_slice(values.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+
+                for value in values {
+                    value.encode_into(out);
+                }
+            }
+            RespValue::Array(None) => {
+                out.extend_from_slice(b"*-1\r\n");
+            }
+        }
+    }
+}
+
+#[test]
+fn encodes_simple_string() {
+    assert_eq!(
+        RespValue::SimpleString("PONG".to_owned()).encode(),
+        b"+PONG\r\n"
+    );
+}
+
+#[test]
+fn encodes_error() {
+    assert_eq!(
+        RespValue::Error("ERR unknown command".to_owned()).encode(),
+        b"-ERR unknown command\r\n"
+    );
+}
+
+#[test]
+fn encodes_bulk_string() {
+    assert_eq!(
+        RespValue::BulkString(Some(b"hello".to_vec())).encode(),
+        b"$5\r\nhello\r\n"
+    );
+}
