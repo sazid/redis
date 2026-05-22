@@ -7,6 +7,7 @@ use mio::{Events, Interest, Poll, Token};
 use slab::Slab;
 
 use crate::config::Config;
+use crate::resp::{self, RespError};
 
 const SERVER: Token = Token(0);
 
@@ -52,9 +53,6 @@ pub fn run(config: Config) -> std::io::Result<()> {
                     loop {
                         match listener.accept() {
                             Ok((mut stream, addr)) => {
-                                // let token = Token(next_token);
-                                // next_token = next_token.wrapping_add(1);
-
                                 let entry = clients.vacant_entry();
                                 let token = key_to_token(entry.key());
 
@@ -68,8 +66,6 @@ pub fn run(config: Config) -> std::io::Result<()> {
                                 });
 
                                 println!("Accepted client {addr} as {token:?}");
-
-                                // clients.insert(token, stream);
                             }
 
                             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -108,6 +104,11 @@ pub fn run(config: Config) -> std::io::Result<()> {
                                     "Received from {token:?}: {:?}",
                                     String::from_utf8_lossy(&buf[..n]),
                                 );
+
+                                if !process_client_buffer(client, token) {
+                                    disconnected = true;
+                                    break;
+                                }
                             }
 
                             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -132,4 +133,29 @@ pub fn run(config: Config) -> std::io::Result<()> {
             }
         }
     }
+}
+
+/// true = keep the client connected
+/// false = disconnect the client
+fn process_client_buffer(client: &mut Client, token: Token) -> bool {
+    while !client.read_buf.is_empty() {
+        match resp::decode_one(&client.read_buf) {
+            Ok((value, remaining)) => {
+                let consumed = client.read_buf.len() - remaining.len();
+
+                println!("Parsed from {token:?}: {value:?}");
+
+                client.read_buf.drain(..consumed);
+            }
+
+            Err(RespError::IncompleteInput) | Err(RespError::MissingCrlf) => return true,
+
+            Err(err) => {
+                eprintln!("protocol error from {token:?}: {err:?}");
+                return false;
+            }
+        }
+    }
+
+    true
 }
