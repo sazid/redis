@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
@@ -47,7 +48,12 @@ pub fn run(config: Config) -> std::io::Result<()> {
     let mut db = RedisDb::new();
 
     loop {
+        // TODO: change `None` to a 100ms timeout which will force the event loop
+        // to wake up even if there's no events to process. This will need to be
+        // coupled with an active key expiry system.
         poll.poll(&mut events, None)?;
+
+        db.update_time(Instant::now());
 
         for event in events.iter() {
             match event.token() {
@@ -203,6 +209,10 @@ fn handle_request(value: RespValue, db: &mut RedisDb) -> RespValue {
         handle_set(&items, db)
     } else if command_name.eq_ignore_ascii_case(b"GET") {
         handle_get(&items, db)
+    } else if command_name.eq_ignore_ascii_case(b"EXPIRE") {
+        handle_expire(&items, db)
+    } else if command_name.eq_ignore_ascii_case(b"EXISTS") {
+        handle_exists(&items, db)
     } else {
         RespValue::Error("ERR unknown command".to_owned())
     }
@@ -212,6 +222,21 @@ fn value_as_bytes(value: &RespValue) -> Option<&[u8]> {
     match value {
         RespValue::BulkString(Some(bytes)) => Some(bytes),
         RespValue::SimpleString(value) => Some(value.as_bytes()),
+        _ => None,
+    }
+}
+
+fn value_as_i64(value: &RespValue) -> Option<i64> {
+    match value {
+        RespValue::Integer(value) => Some(*value),
+
+        RespValue::BulkString(Some(bytes)) => {
+            let text = std::str::from_utf8(bytes).ok()?;
+            text.parse().ok()
+        }
+
+        RespValue::SimpleString(value) => value.parse().ok(),
+
         _ => None,
     }
 }
@@ -305,4 +330,50 @@ fn handle_get(items: &[RespValue], db: &mut RedisDb) -> RespValue {
 
         _ => RespValue::Error("ERR wrong number of arguments for 'get' command".to_owned()),
     }
+}
+
+fn handle_expire(items: &[RespValue], db: &mut RedisDb) -> RespValue {
+    match items {
+        [_command, key, ttl] => {
+            let Some(key) = value_as_bytes(key) else {
+                return RespValue::Error("ERR invalid EXPIRE argument: key".to_owned());
+            };
+
+            let Some(ttl) = value_as_i64(ttl) else {
+                return RespValue::Error("ERR invalid EXPIRE argument: ttl".to_owned());
+            };
+
+            if ttl <= 0 {
+                let deleted = db.delete(key);
+                return RespValue::Integer(if deleted { 1 } else { 0 });
+            }
+
+            let did_expire = db.expire(key, Duration::from_secs(ttl as u64));
+
+            RespValue::Integer(if did_expire { 1 } else { 0 })
+        }
+
+        _ => RespValue::Error("ERR wrong number of arguments for 'expire' command".to_owned()),
+    }
+}
+
+fn handle_exists(items: &[RespValue], db: &mut RedisDb) -> RespValue {
+    if items.len() < 2 {
+        return RespValue::Error("ERR wrong number of arguments for 'exists' command".to_owned());
+    }
+
+    let count = match items[1..].iter().try_fold(0_i64, |count, key| {
+        let Some(key) = value_as_bytes(key) else {
+            return Err(RespValue::Error(
+                "ERR invalid EXISTS argument: key".to_owned(),
+            ));
+        };
+
+        Ok(count + if db.exists(key) { 1 } else { 0 })
+    }) {
+        Ok(count) => count,
+        Err(error) => return error,
+    };
+
+    RespValue::Integer(count)
 }

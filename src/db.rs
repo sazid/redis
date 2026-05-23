@@ -38,6 +38,15 @@ impl RedisDb {
         self.values.get(key).cloned()
     }
 
+    pub fn exists(&mut self, key: &[u8]) -> bool {
+        if self.is_expired(key) {
+            self.delete(key);
+            return false;
+        }
+
+        self.values.contains_key(key)
+    }
+
     pub fn delete(&mut self, key: &[u8]) -> bool {
         let existed = self.values.remove(key).is_some();
         self.expires.remove(key);
@@ -186,6 +195,37 @@ mod tests {
         db.expire(b"foo", Duration::from_secs(10));
         db.delete(b"foo");
 
+        assert!(!db.expires.contains_key(&b"foo"[..]));
+    }
+
+    #[test]
+    fn exists_returns_true_for_existing_key() {
+        let mut db = RedisDb::new();
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+
+        assert!(db.exists(b"foo"));
+    }
+
+    #[test]
+    fn exists_returns_false_for_missing_key() {
+        let mut db = RedisDb::new();
+
+        assert!(!db.exists(b"missing"));
+    }
+
+    #[test]
+    fn exists_lazily_deletes_expired_key() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+        db.expire(b"foo", Duration::from_secs(10));
+        db.update_time(start + Duration::from_secs(10));
+
+        assert!(!db.exists(b"foo"));
+        assert!(!db.values.contains_key(&b"foo"[..]));
         assert!(!db.expires.contains_key(&b"foo"[..]));
     }
 }
