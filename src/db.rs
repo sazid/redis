@@ -54,7 +54,7 @@ impl RedisDb {
     }
 
     pub fn expire(&mut self, key: &[u8], ttl: Duration) -> bool {
-        if !self.values.contains_key(key) {
+        if !self.exists(key) {
             return false;
         }
 

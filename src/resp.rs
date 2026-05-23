@@ -109,7 +109,7 @@ pub fn decode_one(data: &[u8]) -> Result<(RespValue, &[u8]), RespError> {
         }
 
         b'*' => {
-            let (len, mut remaining) = parse_i64_line(&rest)?;
+            let (len, mut remaining) = parse_i64_line(rest)?;
 
             if len == -1 {
                 return Ok((RespValue::Array(None), remaining));
