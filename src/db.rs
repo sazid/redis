@@ -59,3 +59,133 @@ impl RedisDb {
             .is_some_and(|expires_at| self.current_time >= *expires_at)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_returns_none_for_missing_key() {
+        let mut db = RedisDb::new();
+
+        assert_eq!(db.get(b"missing"), None);
+    }
+
+    #[test]
+    fn set_then_get_returns_value() {
+        let mut db = RedisDb::new();
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+
+        assert_eq!(db.get(b"foo"), Some(b"bar".to_vec()));
+    }
+
+    #[test]
+    fn set_overwrites_existing_value() {
+        let mut db = RedisDb::new();
+
+        db.set(b"foo".to_vec(), b"old".to_vec());
+        db.set(b"foo".to_vec(), b"new".to_vec());
+
+        assert_eq!(db.get(b"foo"), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn delete_removes_existing_key() {
+        let mut db = RedisDb::new();
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+
+        assert!(db.delete(b"foo"));
+        assert_eq!(db.get(b"foo"), None);
+    }
+
+    #[test]
+    fn delete_returns_false_for_missing_key() {
+        let mut db = RedisDb::new();
+
+        assert!(!db.delete(b"missing"));
+    }
+
+    #[test]
+    fn expire_returns_false_for_missing_key() {
+        let mut db = RedisDb::new();
+
+        assert!(!db.expire(b"missing", Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn expire_returns_true_for_existing_key() {
+        let mut db = RedisDb::new();
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+
+        assert!(db.expire(b"foo", Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn get_returns_value_before_expiry() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+        db.expire(b"foo", Duration::from_secs(10));
+        db.update_time(start + Duration::from_secs(9));
+
+        assert_eq!(db.get(b"foo"), Some(b"bar".to_vec()));
+    }
+
+    #[test]
+    fn get_lazily_deletes_expired_key() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+        db.expire(b"foo", Duration::from_secs(10));
+        db.update_time(start + Duration::from_secs(10));
+
+        assert_eq!(db.get(b"foo"), None);
+        assert!(!db.values.contains_key(&b"foo"[..]));
+        assert!(!db.expires.contains_key(&b"foo"[..]));
+    }
+
+    #[test]
+    fn zero_duration_expiry_expires_immediately() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+        db.expire(b"foo", Duration::ZERO);
+
+        assert_eq!(db.get(b"foo"), None);
+    }
+
+    #[test]
+    fn set_clears_existing_expiry() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"foo".to_vec(), b"old".to_vec());
+        db.expire(b"foo", Duration::from_secs(10));
+        db.set(b"foo".to_vec(), b"new".to_vec());
+        db.update_time(start + Duration::from_secs(10));
+
+        assert_eq!(db.get(b"foo"), Some(b"new".to_vec()));
+        assert!(!db.expires.contains_key(&b"foo"[..]));
+    }
+
+    #[test]
+    fn delete_removes_expiry_metadata() {
+        let mut db = RedisDb::new();
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+        db.expire(b"foo", Duration::from_secs(10));
+        db.delete(b"foo");
+
+        assert!(!db.expires.contains_key(&b"foo"[..]));
+    }
+}
