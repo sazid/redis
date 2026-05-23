@@ -7,6 +7,7 @@ use mio::{Events, Interest, Poll, Token};
 use slab::Slab;
 
 use crate::config::Config;
+use crate::db::RedisDb;
 use crate::resp::{self, RespError, RespValue};
 
 const SERVER: Token = Token(0);
@@ -42,6 +43,8 @@ pub fn run(config: Config) -> std::io::Result<()> {
     println!("Listening on {address}");
 
     let mut clients: Slab<Client> = Slab::new();
+
+    let mut db = RedisDb::new();
 
     loop {
         poll.poll(&mut events, None)?;
@@ -107,7 +110,7 @@ pub fn run(config: Config) -> std::io::Result<()> {
                                         String::from_utf8_lossy(&buf[..n]),
                                     );
 
-                                    if !process_client_buffer(client, token) {
+                                    if !process_client_buffer(client, token, &mut db) {
                                         disconnected = true;
                                         break;
                                     }
@@ -153,7 +156,7 @@ pub fn run(config: Config) -> std::io::Result<()> {
 
 /// true = keep the client connected
 /// false = disconnect the client
-fn process_client_buffer(client: &mut Client, token: Token) -> bool {
+fn process_client_buffer(client: &mut Client, token: Token, db: &mut RedisDb) -> bool {
     while !client.read_buf.is_empty() {
         match resp::decode_one(&client.read_buf) {
             Ok((value, remaining)) => {
@@ -161,7 +164,7 @@ fn process_client_buffer(client: &mut Client, token: Token) -> bool {
 
                 println!("Parsed from {token:?}: {value:?}");
 
-                let response = handle_request(value);
+                let response = handle_request(value, db);
                 client.write_buf.extend_from_slice(&response.encode());
 
                 client.read_buf.drain(..consumed);
@@ -179,7 +182,7 @@ fn process_client_buffer(client: &mut Client, token: Token) -> bool {
     true
 }
 
-fn handle_request(value: RespValue) -> RespValue {
+fn handle_request(value: RespValue, db: &mut RedisDb) -> RespValue {
     let RespValue::Array(Some(items)) = value else {
         return RespValue::Error("ERR expected array command".to_owned());
     };
@@ -194,6 +197,12 @@ fn handle_request(value: RespValue) -> RespValue {
 
     if command_name.eq_ignore_ascii_case(b"PING") {
         handle_ping(&items)
+    } else if command_name.eq_ignore_ascii_case(b"ECHO") {
+        handle_echo(&items)
+    } else if command_name.eq_ignore_ascii_case(b"SET") {
+        handle_set(&items, db)
+    } else if command_name.eq_ignore_ascii_case(b"GET") {
+        handle_get(&items, db)
     } else {
         RespValue::Error("ERR unknown command".to_owned())
     }
@@ -204,22 +213,6 @@ fn value_as_bytes(value: &RespValue) -> Option<&[u8]> {
         RespValue::BulkString(Some(bytes)) => Some(bytes),
         RespValue::SimpleString(value) => Some(value.as_bytes()),
         _ => None,
-    }
-}
-
-fn handle_ping(items: &[RespValue]) -> RespValue {
-    match items {
-        [_command] => RespValue::SimpleString("PONG".to_owned()),
-
-        [_command, message] => {
-            let Some(bytes) = value_as_bytes(message) else {
-                return RespValue::Error("ERR invalid PING argument".to_owned());
-            };
-
-            RespValue::BulkString(Some(bytes.to_vec()))
-        }
-
-        _ => RespValue::Error("ERR wrong number of arguments for 'ping' command".to_owned()),
     }
 }
 
@@ -247,4 +240,69 @@ fn flush_client_write_buffer(client: &mut Client, token: Token) -> io::Result<bo
     }
 
     Ok(true)
+}
+
+// --- Command handlers --- //
+
+fn handle_ping(items: &[RespValue]) -> RespValue {
+    match items {
+        [_command] => RespValue::SimpleString("PONG".to_owned()),
+
+        [_command, message] => {
+            let Some(bytes) = value_as_bytes(message) else {
+                return RespValue::Error("ERR invalid PING argument".to_owned());
+            };
+
+            RespValue::BulkString(Some(bytes.to_vec()))
+        }
+
+        _ => RespValue::Error("ERR wrong number of arguments for 'ping' command".to_owned()),
+    }
+}
+
+fn handle_echo(items: &[RespValue]) -> RespValue {
+    match items {
+        [_command, message] => {
+            let Some(bytes) = value_as_bytes(message) else {
+                return RespValue::Error("ERR invalid ECHO argument".to_owned());
+            };
+
+            RespValue::BulkString(Some(bytes.to_vec()))
+        }
+
+        _ => RespValue::Error("ERR wrong number of arguments for 'echo' command".to_owned()),
+    }
+}
+
+fn handle_set(items: &[RespValue], db: &mut RedisDb) -> RespValue {
+    match items {
+        [_command, key, value] => {
+            let Some(key) = value_as_bytes(key) else {
+                return RespValue::Error("ERR invalid SET argument: key".to_owned());
+            };
+            let Some(value) = value_as_bytes(value) else {
+                return RespValue::Error("ERR invalid SET argument: value".to_owned());
+            };
+
+            db.set(key.to_owned(), value.to_owned());
+
+            RespValue::SimpleString("OK".to_owned())
+        }
+
+        _ => RespValue::Error("ERR wrong number of arguments for 'set' command".to_owned()),
+    }
+}
+
+fn handle_get(items: &[RespValue], db: &mut RedisDb) -> RespValue {
+    match items {
+        [_command, key] => {
+            let Some(key) = value_as_bytes(key) else {
+                return RespValue::Error("ERR invalid GET argument: key".to_owned());
+            };
+
+            RespValue::BulkString(db.get(key))
+        }
+
+        _ => RespValue::Error("ERR wrong number of arguments for 'get' command".to_owned()),
+    }
 }
