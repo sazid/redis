@@ -67,6 +67,22 @@ impl RedisDb {
             .get(key)
             .is_some_and(|expires_at| self.current_time >= *expires_at)
     }
+
+    pub fn ttl(&mut self, key: &[u8]) -> i64 {
+        if !self.exists(key) {
+            return -2;
+        }
+
+        let Some(expires_at) = self.expires.get(key) else {
+            return -1;
+        };
+
+        expires_at
+            .saturating_duration_since(self.current_time)
+            .as_secs()
+            .try_into()
+            .unwrap_or(i64::MAX)
+    }
 }
 
 #[cfg(test)]
