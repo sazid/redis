@@ -1,3 +1,4 @@
+mod del;
 mod echo;
 mod exists;
 mod expire;
@@ -7,8 +8,8 @@ mod set;
 mod ttl;
 
 use self::{
-    echo::handle_echo, exists::handle_exists, expire::handle_expire, get::handle_get,
-    ping::handle_ping, set::handle_set, ttl::handle_ttl,
+    del::handle_del, echo::handle_echo, exists::handle_exists, expire::handle_expire,
+    get::handle_get, ping::handle_ping, set::handle_set, ttl::handle_ttl,
 };
 use crate::{db::RedisDb, resp::RespValue};
 
@@ -39,6 +40,8 @@ pub(super) fn handle_request(value: RespValue, db: &mut RedisDb) -> RespValue {
         handle_exists(&items, db)
     } else if command_name.eq_ignore_ascii_case(b"TTL") {
         handle_ttl(&items, db)
+    } else if command_name.eq_ignore_ascii_case(b"DEL") {
+        handle_del(&items, db)
     } else {
         RespValue::Error("ERR unknown command".to_owned())
     }
