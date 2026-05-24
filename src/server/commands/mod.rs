@@ -297,6 +297,40 @@ mod tests {
         assert!(matches!(result, RespValue::Error(e) if e.contains("bulk string")));
     }
 
+    // --- DEL ---
+
+    #[test]
+    fn del_returns_count_of_deleted_keys() {
+        let mut db = RedisDb::new();
+        db.set(b"k1".to_vec(), b"v1".to_vec());
+        db.set(b"k2".to_vec(), b"v2".to_vec());
+        let result = handle_request(
+            command(&[
+                resp_bulk("DEL"),
+                resp_bulk("k1"),
+                resp_bulk("k2"),
+                resp_bulk("missing"),
+            ]),
+            &mut db,
+        );
+        assert_eq!(result, RespValue::Integer(2));
+    }
+
+    #[test]
+    fn del_returns_zero_for_missing_keys() {
+        let mut db = RedisDb::new();
+        let result = handle_request(command(&[resp_bulk("DEL"), resp_bulk("missing")]), &mut db);
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[test]
+    fn del_case_insensitive() {
+        let mut db = RedisDb::new();
+        db.set(b"k".to_vec(), b"v".to_vec());
+        let result = handle_request(command(&[resp_bulk("del"), resp_bulk("k")]), &mut db);
+        assert_eq!(result, RespValue::Integer(1));
+    }
+
     // --- MULTI-COMMAND SEQUENCES ---
 
     #[test]
@@ -481,5 +515,40 @@ mod tests {
         );
         let r2 = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(r2, RespValue::BulkString(Some(b"v2".to_vec())));
+    }
+
+    #[test]
+    fn set_then_exists_then_del_then_exists() {
+        let mut db = RedisDb::new();
+
+        handle_request(
+            command(&[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v")]),
+            &mut db,
+        );
+
+        let result = handle_request(command(&[resp_bulk("EXISTS"), resp_bulk("k")]), &mut db);
+        assert_eq!(result, RespValue::Integer(1));
+
+        handle_request(command(&[resp_bulk("DEL"), resp_bulk("k")]), &mut db);
+
+        let result = handle_request(command(&[resp_bulk("EXISTS"), resp_bulk("k")]), &mut db);
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[test]
+    fn set_then_get_then_del_then_get() {
+        let mut db = RedisDb::new();
+
+        handle_request(
+            command(&[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v")]),
+            &mut db,
+        );
+        let r1 = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        assert_eq!(r1, RespValue::BulkString(Some(b"v".to_vec())));
+
+        handle_request(command(&[resp_bulk("DEL"), resp_bulk("k")]), &mut db);
+
+        let r2 = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        assert_eq!(r2, RespValue::BulkString(None));
     }
 }
