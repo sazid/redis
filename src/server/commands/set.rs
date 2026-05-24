@@ -46,3 +46,174 @@ fn set_key_value(
     }
     RespValue::SimpleString("OK".to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::resp::RespValue;
+
+    fn resp_bulk(s: &'static str) -> RespValue {
+        RespValue::BulkString(Some(s.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn set_stores_value() {
+        let mut db = RedisDb::new();
+        let result = handle_set(&[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v")], &mut db);
+        assert_eq!(result, RespValue::SimpleString("OK".to_owned()));
+        assert_eq!(db.get(b"k"), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn set_overwrites_existing_value() {
+        let mut db = RedisDb::new();
+        db.set(b"k".to_vec(), b"old".to_vec());
+
+        let result = handle_set(
+            &[resp_bulk("SET"), resp_bulk("k"), resp_bulk("new")],
+            &mut db,
+        );
+        assert_eq!(result, RespValue::SimpleString("OK".to_owned()));
+        assert_eq!(db.get(b"k"), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn set_clears_existing_ttl() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+        db.set(b"k".to_vec(), b"v1".to_vec());
+        db.expire(b"k", Duration::from_secs(10));
+
+        // SET without EX should clear the TTL
+        handle_set(
+            &[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v2")],
+            &mut db,
+        );
+        db.update_time(start + Duration::from_secs(20));
+
+        // value should still be accessible since TTL was cleared
+        assert_eq!(db.get(b"k"), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn set_with_ex_sets_ttl() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("k"),
+                resp_bulk("v"),
+                resp_bulk("EX"),
+                resp_bulk("10"),
+            ],
+            &mut db,
+        );
+        assert_eq!(result, RespValue::SimpleString("OK".to_owned()));
+        assert_eq!(db.get(b"k"), Some(b"v".to_vec()));
+
+        // TTL should be 10 seconds
+        db.update_time(start + Duration::from_secs(9));
+        assert_eq!(db.get(b"k"), Some(b"v".to_vec()));
+        db.update_time(start + Duration::from_secs(10));
+        assert_eq!(db.get(b"k"), None);
+    }
+
+    #[test]
+    fn set_with_ex_rejects_zero_ttl() {
+        let mut db = RedisDb::new();
+
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("k"),
+                resp_bulk("v"),
+                resp_bulk("EX"),
+                resp_bulk("0"),
+            ],
+            &mut db,
+        );
+        assert!(matches!(result, RespValue::Error(_)));
+        assert_eq!(db.get(b"k"), None);
+    }
+
+    #[test]
+    fn set_with_ex_rejects_negative_ttl() {
+        let mut db = RedisDb::new();
+
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("k"),
+                resp_bulk("v"),
+                resp_bulk("EX"),
+                resp_bulk("-5"),
+            ],
+            &mut db,
+        );
+        assert!(matches!(result, RespValue::Error(_)));
+        assert_eq!(db.get(b"k"), None);
+    }
+
+    #[test]
+    fn set_rejects_non_ex_option() {
+        let mut db = RedisDb::new();
+
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("k"),
+                resp_bulk("v"),
+                resp_bulk("NOTEX"),
+                resp_bulk("10"),
+            ],
+            &mut db,
+        );
+        assert!(matches!(result, RespValue::Error(_)));
+        assert_eq!(db.get(b"k"), None);
+    }
+
+    #[test]
+    fn set_rejects_wrong_number_of_arguments() {
+        let mut db = RedisDb::new();
+
+        // too few
+        let result = handle_set(&[resp_bulk("SET"), resp_bulk("k")], &mut db);
+        assert!(matches!(result, RespValue::Error(_)));
+
+        // too many (without EX/PX)
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("k"),
+                resp_bulk("v"),
+                resp_bulk("extra"),
+            ],
+            &mut db,
+        );
+        assert!(matches!(result, RespValue::Error(_)));
+    }
+
+    #[test]
+    fn set_accepts_ex_case_insensitively() {
+        let mut db = RedisDb::new();
+
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("k"),
+                resp_bulk("v"),
+                resp_bulk("ex"),
+                resp_bulk("10"),
+            ],
+            &mut db,
+        );
+        assert_eq!(result, RespValue::SimpleString("OK".to_owned()));
+        assert_eq!(db.get(b"k"), Some(b"v".to_vec()));
+    }
+}
