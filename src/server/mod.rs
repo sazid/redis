@@ -2,7 +2,7 @@ mod commands;
 
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
@@ -16,6 +16,7 @@ use crate::resp::{self, RespError};
 use commands::handle_request;
 
 const SERVER: Token = Token(0);
+const ACTIVE_EXPIRE_INTERVAL: Duration = Duration::from_millis(100);
 
 struct Client {
     socket: TcpStream,
@@ -51,13 +52,26 @@ pub fn run(config: Config) -> std::io::Result<()> {
 
     let mut db = RedisDb::new();
 
-    loop {
-        // TODO: change `None` to a 100ms timeout which will force the event loop
-        // to wake up even if there's no events to process. This will need to be
-        // coupled with an active key expiry system.
-        poll.poll(&mut events, None)?;
+    let mut last_active_expire = Instant::now();
 
-        db.update_time(Instant::now());
+    loop {
+        let elapsed = last_active_expire.elapsed();
+
+        let poll_timeout = Some(if elapsed >= ACTIVE_EXPIRE_INTERVAL {
+            Duration::ZERO
+        } else {
+            ACTIVE_EXPIRE_INTERVAL - elapsed
+        });
+
+        poll.poll(&mut events, poll_timeout)?;
+
+        let now = Instant::now();
+        db.update_time(now);
+
+        if now.duration_since(last_active_expire) >= ACTIVE_EXPIRE_INTERVAL {
+            db.active_expire_sample();
+            last_active_expire = now;
+        }
 
         for event in events.iter() {
             match event.token() {

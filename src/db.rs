@@ -1,6 +1,8 @@
 use indexmap::IndexMap;
 use std::time::{Duration, Instant};
 
+const ACTIVE_EXPIRE_SAMPLE_SIZE: usize = 20;
+
 pub struct RedisDb {
     values: IndexMap<Vec<u8>, Vec<u8>>,
     expires: IndexMap<Vec<u8>, Instant>,
@@ -83,7 +85,43 @@ impl RedisDb {
     }
 
     pub fn active_expire_sample(&mut self) {
-        todo!()
+        if self.expires.is_empty() {
+            return;
+        }
+        let now = self.current_time;
+        'outer: for _ in 0..10 {
+            let mut expired_count = 0;
+            for _ in 0..ACTIVE_EXPIRE_SAMPLE_SIZE {
+                if self.expires.is_empty() {
+                    break 'outer;
+                }
+                let index = fastrand::usize(..self.expires.len());
+
+                let expired_key = self
+                    .expires
+                    .get_index(index)
+                    .and_then(|(key, &expires_at)| {
+                        if now >= expires_at {
+                            Some(key.clone())
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(key) = expired_key {
+                    self.delete(&key);
+                    expired_count += 1;
+                }
+            }
+
+            // If sample size is greater than 25% of the ACTIVE_EXPIRE_SAMPLE_SIZE
+            // rerun the loop again because the sample size is the representative
+            // of the total key population - which means there might be many stale
+            // keys that needs to be cleaned up.
+            if expired_count <= 5 {
+                break;
+            }
+        }
     }
 }
 
