@@ -284,4 +284,116 @@ mod tests {
         assert!(!db.values.contains_key(&b"foo"[..]));
         assert!(!db.expires.contains_key(&b"foo"[..]));
     }
+
+    #[test]
+    fn ttl_returns_minus_2_for_missing_key() {
+        let mut db = RedisDb::new();
+
+        assert_eq!(db.ttl(b"missing"), -2);
+    }
+
+    #[test]
+    fn ttl_returns_minus_1_for_key_without_expiry() {
+        let mut db = RedisDb::new();
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+
+        assert_eq!(db.ttl(b"foo"), -1);
+    }
+
+    #[test]
+    fn ttl_returns_remaining_seconds_for_key_with_expiry() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+        db.expire(b"foo", Duration::from_secs(10));
+        db.update_time(start + Duration::from_secs(4));
+
+        assert_eq!(db.ttl(b"foo"), 6);
+    }
+
+    #[test]
+    fn ttl_lazily_deletes_expired_key() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"foo".to_vec(), b"bar".to_vec());
+        db.expire(b"foo", Duration::from_secs(10));
+        db.update_time(start + Duration::from_secs(10));
+
+        assert_eq!(db.ttl(b"foo"), -2);
+        assert!(!db.values.contains_key(&b"foo"[..]));
+        assert!(!db.expires.contains_key(&b"foo"[..]));
+    }
+
+    #[test]
+    fn active_expire_sample_removes_expired_keys() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        for i in 0..50 {
+            let key = format!("key-{i}").into_bytes();
+            db.set(key.clone(), b"value".to_vec());
+            db.expire(&key, Duration::from_secs(10));
+        }
+
+        db.update_time(start + Duration::from_secs(10));
+        db.active_expire_sample();
+
+        assert!(db.values.is_empty());
+        assert!(db.expires.is_empty());
+    }
+
+    #[test]
+    fn active_expire_sample_keeps_unexpired_keys() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        for i in 0..50 {
+            let key = format!("key-{i}").into_bytes();
+            db.set(key.clone(), b"value".to_vec());
+            db.expire(&key, Duration::from_secs(10));
+        }
+
+        db.update_time(start + Duration::from_secs(5));
+        db.active_expire_sample();
+
+        assert_eq!(db.values.len(), 50);
+        assert_eq!(db.expires.len(), 50);
+    }
+
+    #[test]
+    fn active_expire_sample_keeps_keys_without_expiry() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        for i in 0..50 {
+            let key = format!("expired-{i}").into_bytes();
+            db.set(key.clone(), b"value".to_vec());
+            db.expire(&key, Duration::from_secs(10));
+        }
+
+        for i in 0..10 {
+            db.set(format!("persistent-{i}").into_bytes(), b"value".to_vec());
+        }
+
+        db.update_time(start + Duration::from_secs(10));
+        db.active_expire_sample();
+
+        assert_eq!(db.values.len(), 10);
+        assert!(db.expires.is_empty());
+
+        for i in 0..10 {
+            assert_eq!(
+                db.get(format!("persistent-{i}").as_bytes()),
+                Some(b"value".to_vec())
+            );
+        }
+    }
 }

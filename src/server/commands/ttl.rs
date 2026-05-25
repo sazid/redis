@@ -34,7 +34,7 @@ mod tests {
 
         // Should be close to 10 (accounting for test execution time)
         let result = handle_ttl(&[resp_bulk("TTL"), resp_bulk("k")], &mut db);
-        assert!(matches!(result, RespValue::Integer(n) if n <= 10 && n >= 9));
+        assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
     }
 
     #[test]

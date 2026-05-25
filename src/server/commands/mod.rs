@@ -249,7 +249,7 @@ mod tests {
         db.set(b"k".to_vec(), b"v".to_vec());
         db.expire(b"k", std::time::Duration::from_secs(10));
         let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
-        assert!(matches!(result, RespValue::Integer(n) if n <= 10 && n >= 9));
+        assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
     }
 
     #[test]
@@ -436,12 +436,12 @@ mod tests {
 
         // TTL should be ~10
         let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
-        assert!(matches!(result, RespValue::Integer(n) if n <= 10 && n >= 9));
+        assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
 
         // After 5 seconds, TTL should be ~5
         db.update_time(start + std::time::Duration::from_secs(5));
         let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
-        assert!(matches!(result, RespValue::Integer(n) if n <= 5 && n >= 4));
+        assert!(matches!(result, RespValue::Integer(n) if (4..=5).contains(&n)));
 
         // After expiry, TTL should be gone
         db.update_time(start + std::time::Duration::from_secs(10));
@@ -465,7 +465,7 @@ mod tests {
         );
 
         let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
-        assert!(matches!(result, RespValue::Integer(n) if n <= 10 && n >= 9));
+        assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
     }
 
     #[test]
