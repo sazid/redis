@@ -1,12 +1,23 @@
 use indexmap::IndexMap;
 use std::time::{Duration, Instant};
 
+/// How many samples to take from total population when actively
+/// cleaning up expired keys.
 const ACTIVE_EXPIRE_SAMPLE_SIZE: usize = 20;
+/// Rough estimate for IndexMap internal + HashMap bucket
+const VALUES_ENTRY_OVERHEAD: usize = 64;
+const EXPIRES_ENTRY_OVERHEAD: usize = 32;
 
 pub struct RedisDb {
     values: IndexMap<Vec<u8>, Vec<u8>>,
     expires: IndexMap<Vec<u8>, Instant>,
     current_time: Instant,
+    memory_used: usize,
+}
+
+#[inline(always)]
+fn entry_memory_cost(key: &[u8], value: &[u8]) -> usize {
+    key.len() + value.len() + VALUES_ENTRY_OVERHEAD + EXPIRES_ENTRY_OVERHEAD
 }
 
 impl RedisDb {
@@ -15,6 +26,7 @@ impl RedisDb {
             values: IndexMap::new(),
             expires: IndexMap::new(),
             current_time: Instant::now(),
+            memory_used: 0,
         }
     }
 
@@ -23,9 +35,15 @@ impl RedisDb {
     }
 
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        self.values.insert(key.clone(), value);
+        let entry_cost = entry_memory_cost(&key, &value);
 
-        // Redis SET clears existing TTL unless KEEPTTL is used.
+        // If overwriting, free old memory first
+        if let Some(old_value) = self.values.get(&key) {
+            self.memory_used -= entry_memory_cost(&key, old_value);
+        }
+
+        self.memory_used += entry_cost;
+        self.values.insert(key.clone(), value);
         self.expires.swap_remove(&key);
     }
 
@@ -48,9 +66,13 @@ impl RedisDb {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> bool {
-        let existed = self.values.swap_remove(key).is_some();
-        self.expires.swap_remove(key);
-        existed
+        if let Some(value) = self.values.swap_remove(key) {
+            self.memory_used -= entry_memory_cost(key, &value);
+            self.expires.swap_remove(key);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn expire(&mut self, key: &[u8], ttl: Duration) -> bool {
@@ -82,6 +104,10 @@ impl RedisDb {
             .as_secs()
             .try_into()
             .unwrap_or(i64::MAX)
+    }
+
+    pub fn memory_used(&self) -> usize {
+        self.memory_used
     }
 
     pub fn active_expire_sample(&mut self) {
@@ -395,5 +421,226 @@ mod tests {
                 Some(b"value".to_vec())
             );
         }
+    }
+
+    #[test]
+    fn memory_used_starts_at_zero() {
+        let db = RedisDb::new();
+        assert_eq!(db.memory_used(), 0);
+    }
+
+    #[test]
+    fn set_increases_memory_used() {
+        let mut db = RedisDb::new();
+        db.set(b"key".to_vec(), b"value".to_vec());
+
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+    }
+
+    #[test]
+    fn set_overwrite_correctly_updates_memory() {
+        let mut db = RedisDb::new();
+
+        db.set(b"key".to_vec(), b"old".to_vec());
+        let old_cost = entry_memory_cost(b"key", b"old");
+        assert_eq!(db.memory_used(), old_cost);
+
+        db.set(b"key".to_vec(), b"new".to_vec());
+        let new_cost = entry_memory_cost(b"key", b"new");
+        assert_eq!(db.memory_used(), new_cost);
+    }
+
+    #[test]
+    fn set_overwrite_with_smaller_value_frees_memory() {
+        let mut db = RedisDb::new();
+
+        db.set(b"key".to_vec(), b"bigvalue".to_vec());
+        let big_cost = entry_memory_cost(b"key", b"bigvalue");
+        assert_eq!(db.memory_used(), big_cost);
+
+        db.set(b"key".to_vec(), b"x".to_vec());
+        let small_cost = entry_memory_cost(b"key", b"x");
+        assert!(db.memory_used() < big_cost);
+        assert_eq!(db.memory_used(), small_cost);
+    }
+
+    #[test]
+    fn delete_decreases_memory_used() {
+        let mut db = RedisDb::new();
+
+        db.set(b"key".to_vec(), b"value".to_vec());
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+
+        db.delete(b"key");
+        assert_eq!(db.memory_used(), 0);
+    }
+
+    #[test]
+    fn delete_nonexistent_key_does_not_affect_memory() {
+        let mut db = RedisDb::new();
+
+        db.set(b"key".to_vec(), b"value".to_vec());
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+
+        db.delete(b"missing");
+        assert_eq!(db.memory_used(), cost);
+    }
+
+    #[test]
+    fn multiple_keys_track_independent_memory() {
+        let mut db = RedisDb::new();
+
+        db.set(b"k1".to_vec(), b"v1".to_vec());
+        let cost1 = entry_memory_cost(b"k1", b"v1");
+
+        db.set(b"k2".to_vec(), b"v2".to_vec());
+        let cost2 = entry_memory_cost(b"k2", b"v2");
+
+        assert_eq!(db.memory_used(), cost1 + cost2);
+
+        db.delete(b"k1");
+        assert_eq!(db.memory_used(), cost2);
+
+        db.delete(b"k2");
+        assert_eq!(db.memory_used(), 0);
+    }
+
+    #[test]
+    fn expire_does_not_affect_memory() {
+        let mut db = RedisDb::new();
+
+        db.set(b"key".to_vec(), b"value".to_vec());
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+
+        db.expire(b"key", Duration::from_secs(10));
+        assert_eq!(db.memory_used(), cost);
+    }
+
+    #[test]
+    fn lazy_delete_on_expired_key_frees_memory() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"key".to_vec(), b"value".to_vec());
+        db.expire(b"key", Duration::from_secs(10));
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+
+        db.update_time(start + Duration::from_secs(10));
+
+        // get on expired key triggers lazy delete
+        db.get(b"key");
+        assert_eq!(db.memory_used(), 0);
+    }
+
+    #[test]
+    fn lazy_delete_on_expired_exists_frees_memory() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"key".to_vec(), b"value".to_vec());
+        db.expire(b"key", Duration::from_secs(10));
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+
+        db.update_time(start + Duration::from_secs(10));
+
+        // exists on expired key triggers lazy delete
+        db.exists(b"key");
+        assert_eq!(db.memory_used(), 0);
+    }
+
+    #[test]
+    fn lazy_delete_on_expired_ttl_frees_memory() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        db.set(b"key".to_vec(), b"value".to_vec());
+        db.expire(b"key", Duration::from_secs(10));
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+
+        db.update_time(start + Duration::from_secs(10));
+
+        // ttl on expired key triggers lazy delete
+        db.ttl(b"key");
+        assert_eq!(db.memory_used(), 0);
+    }
+
+    #[test]
+    fn active_expire_sample_frees_memory_on_expired_keys() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        for i in 0..10 {
+            let key = format!("key-{i}");
+            db.set(key.clone().into_bytes(), b"value".to_vec());
+            db.expire(key.as_bytes(), Duration::from_secs(10));
+        }
+
+        let cost_per_entry = entry_memory_cost(b"key-0", b"value");
+        assert_eq!(db.memory_used(), cost_per_entry * 10);
+
+        db.update_time(start + Duration::from_secs(10));
+        db.active_expire_sample();
+
+        assert_eq!(db.memory_used(), 0);
+    }
+
+    #[test]
+    fn active_expire_sample_keeps_memory_for_unexpired_keys() {
+        let start = Instant::now();
+        let mut db = RedisDb::new();
+        db.update_time(start);
+
+        for i in 0..10 {
+            let key = format!("key-{i}");
+            db.set(key.clone().into_bytes(), b"value".to_vec());
+            db.expire(key.as_bytes(), Duration::from_secs(10));
+        }
+
+        let cost_per_entry = entry_memory_cost(b"key-0", b"value");
+        assert_eq!(db.memory_used(), cost_per_entry * 10);
+
+        // Advance time but not past expiry
+        db.update_time(start + Duration::from_secs(5));
+        db.active_expire_sample();
+
+        assert_eq!(db.memory_used(), cost_per_entry * 10);
+    }
+
+    #[test]
+    fn set_clears_expiry_but_keeps_memory_same() {
+        let mut db = RedisDb::new();
+
+        db.set(b"key".to_vec(), b"value".to_vec());
+        db.expire(b"key", Duration::from_secs(10));
+        let cost = entry_memory_cost(b"key", b"value");
+        assert_eq!(db.memory_used(), cost);
+
+        // SET without EX clears TTL but doesn't change memory
+        db.set(b"key".to_vec(), b"value".to_vec());
+        assert_eq!(db.memory_used(), cost);
+    }
+
+    #[test]
+    fn entry_memory_cost_includes_overhead() {
+        // Verify the cost includes key + value + both overheads
+        let key = b"k";
+        let value = b"v";
+        let cost = entry_memory_cost(key, value);
+
+        assert_eq!(
+            cost,
+            key.len() + value.len() + VALUES_ENTRY_OVERHEAD + EXPIRES_ENTRY_OVERHEAD
+        );
     }
 }
