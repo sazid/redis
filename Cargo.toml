@@ -9,3 +9,4 @@ mio = { workspace = true }
 slab = { workspace = true }
 indexmap = { workspace = true }
 fastrand = { workspace = true }
+mimalloc = { workspace = true }
