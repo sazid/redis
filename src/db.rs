@@ -1,19 +1,17 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use indexmap::IndexMap;
+use std::time::{Duration, Instant};
 
 pub struct RedisDb {
-    values: HashMap<Vec<u8>, Vec<u8>>,
-    expires: HashMap<Vec<u8>, Instant>,
+    values: IndexMap<Vec<u8>, Vec<u8>>,
+    expires: IndexMap<Vec<u8>, Instant>,
     current_time: Instant,
 }
 
 impl RedisDb {
     pub fn new() -> Self {
         Self {
-            values: HashMap::new(),
-            expires: HashMap::new(),
+            values: IndexMap::new(),
+            expires: IndexMap::new(),
             current_time: Instant::now(),
         }
     }
@@ -26,7 +24,7 @@ impl RedisDb {
         self.values.insert(key.clone(), value);
 
         // Redis SET clears existing TTL unless KEEPTTL is used.
-        self.expires.remove(&key);
+        self.expires.swap_remove(&key);
     }
 
     pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
@@ -48,8 +46,8 @@ impl RedisDb {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> bool {
-        let existed = self.values.remove(key).is_some();
-        self.expires.remove(key);
+        let existed = self.values.swap_remove(key).is_some();
+        self.expires.swap_remove(key);
         existed
     }
 
@@ -82,6 +80,10 @@ impl RedisDb {
             .as_secs()
             .try_into()
             .unwrap_or(i64::MAX)
+    }
+
+    pub fn active_expire_sample(&mut self) {
+        todo!()
     }
 }
 

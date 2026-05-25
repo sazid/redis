@@ -7,3 +7,4 @@ edition = "2024"
 clap = { workspace = true }
 mio = { workspace = true }
 slab = { workspace = true }
+indexmap = { workspace = true }
