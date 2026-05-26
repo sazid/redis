@@ -29,7 +29,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut db = RedisDb::new();
         db.update_time(start);
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         db.expire(b"k", std::time::Duration::from_secs(10));
 
         // Should be close to 10 (accounting for test execution time)
@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn ttl_returns_minus_1_for_key_without_ttl() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_ttl(&[resp_bulk("TTL"), resp_bulk("k")], &mut db);
         assert_eq!(result, RespValue::Integer(-1));
@@ -59,7 +59,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut db = RedisDb::new();
         db.update_time(start);
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         db.expire(b"k", std::time::Duration::from_secs(5));
         db.update_time(start + std::time::Duration::from_secs(5));
 

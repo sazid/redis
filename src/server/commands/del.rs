@@ -32,9 +32,9 @@ mod tests {
     #[test]
     fn del_returns_count_of_deleted_keys() {
         let mut db = RedisDb::new();
-        db.set(b"k1".to_vec(), b"v1".to_vec());
-        db.set(b"k2".to_vec(), b"v2".to_vec());
-        db.set(b"k3".to_vec(), b"v3".to_vec());
+        db.set(b"k1".to_vec(), b"v1".to_vec()).unwrap();
+        db.set(b"k2".to_vec(), b"v2".to_vec()).unwrap();
+        db.set(b"k3".to_vec(), b"v3".to_vec()).unwrap();
 
         let result = handle_del(
             &[
@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn del_removes_existing_key() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         handle_del(&[resp_bulk("DEL"), resp_bulk("k")], &mut db);
         assert_eq!(db.get(b"k"), None);
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn del_returns_count_for_single_existing_key() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_del(&[resp_bulk("DEL"), resp_bulk("k")], &mut db);
         assert_eq!(result, RespValue::Integer(1));

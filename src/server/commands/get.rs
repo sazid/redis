@@ -27,7 +27,7 @@ mod tests {
     #[test]
     fn get_returns_stored_value() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_get(&[resp_bulk("GET"), resp_bulk("k")], &mut db);
         assert_eq!(result, RespValue::BulkString(Some(b"v".to_vec())));
@@ -46,7 +46,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut db = RedisDb::new();
         db.update_time(start);
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         db.expire(b"k", std::time::Duration::from_secs(5));
         db.update_time(start + std::time::Duration::from_secs(5));
 

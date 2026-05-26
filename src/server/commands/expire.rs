@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn expire_sets_ttl_and_returns_1() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_expire(
             &[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(10)],
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn expire_returns_1_and_deletes_key_for_zero_ttl() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_expire(&[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(0)], &mut db);
         assert_eq!(result, RespValue::Integer(1));
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn expire_returns_1_and_deletes_key_for_negative_ttl() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_expire(
             &[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(-5)],
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn expire_rejects_non_integer_ttl() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_expire(
             &[

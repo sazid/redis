@@ -8,6 +8,7 @@ pub mod resp;
 pub mod server;
 
 mod db;
+mod eviction;
 
 pub mod build {
     pub const VERSION: &str = env!("CARGO_PKG_VERSION");

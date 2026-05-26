@@ -34,9 +34,9 @@ mod tests {
     #[test]
     fn exists_returns_count_of_existing_keys() {
         let mut db = RedisDb::new();
-        db.set(b"k1".to_vec(), b"v1".to_vec());
-        db.set(b"k2".to_vec(), b"v2".to_vec());
-        db.set(b"k3".to_vec(), b"v3".to_vec());
+        db.set(b"k1".to_vec(), b"v1".to_vec()).unwrap();
+        db.set(b"k2".to_vec(), b"v2".to_vec()).unwrap();
+        db.set(b"k3".to_vec(), b"v3".to_vec()).unwrap();
 
         let result = handle_exists(
             &[
@@ -66,7 +66,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut db = RedisDb::new();
         db.update_time(start);
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         db.expire(b"k", std::time::Duration::from_secs(5));
         db.update_time(start + std::time::Duration::from_secs(5));
 
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn exists_returns_one_for_single_existing_key() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
 
         let result = handle_exists(&[resp_bulk("EXISTS"), resp_bulk("k")], &mut db);
         assert_eq!(result, RespValue::Integer(1));

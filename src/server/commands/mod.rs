@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn get_returns_stored_value() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         let result = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::BulkString(Some(b"v".to_vec())));
     }
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn expire_sets_ttl() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         let result = handle_request(
             command(&[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(10)]),
             &mut db,
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn expire_with_zero_ttl_deletes_key() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         handle_request(
             command(&[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(0)]),
             &mut db,
@@ -228,8 +228,8 @@ mod tests {
     #[test]
     fn exists_returns_count() {
         let mut db = RedisDb::new();
-        db.set(b"k1".to_vec(), b"v1".to_vec());
-        db.set(b"k2".to_vec(), b"v2".to_vec());
+        db.set(b"k1".to_vec(), b"v1".to_vec()).unwrap();
+        db.set(b"k2".to_vec(), b"v2".to_vec()).unwrap();
         let result = handle_request(
             command(&[
                 resp_bulk("EXISTS"),
@@ -249,7 +249,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut db = RedisDb::new();
         db.update_time(start);
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         db.expire(b"k", std::time::Duration::from_secs(10));
         let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn ttl_returns_minus_1_for_no_expiry() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::Integer(-1));
     }
@@ -305,8 +305,8 @@ mod tests {
     #[test]
     fn del_returns_count_of_deleted_keys() {
         let mut db = RedisDb::new();
-        db.set(b"k1".to_vec(), b"v1".to_vec());
-        db.set(b"k2".to_vec(), b"v2".to_vec());
+        db.set(b"k1".to_vec(), b"v1".to_vec()).unwrap();
+        db.set(b"k2".to_vec(), b"v2".to_vec()).unwrap();
         let result = handle_request(
             command(&[
                 resp_bulk("DEL"),
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn del_case_insensitive() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"v".to_vec());
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         let result = handle_request(command(&[resp_bulk("del"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::Integer(1));
     }

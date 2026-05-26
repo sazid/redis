@@ -40,7 +40,9 @@ fn set_key_value(
         return RespValue::Error("ERR invalid SET argument: value".to_owned());
     };
 
-    db.set(key.to_owned(), value.to_owned());
+    if let Err(err) = db.set(key.to_owned(), value.to_owned()) {
+        return RespValue::Error(format!("ERR {err:?}"));
+    }
     if let Some(duration) = expiry {
         db.expire(key, duration);
     }
@@ -69,7 +71,7 @@ mod tests {
     #[test]
     fn set_overwrites_existing_value() {
         let mut db = RedisDb::new();
-        db.set(b"k".to_vec(), b"old".to_vec());
+        db.set(b"k".to_vec(), b"old".to_vec()).unwrap();
 
         let result = handle_set(
             &[resp_bulk("SET"), resp_bulk("k"), resp_bulk("new")],
@@ -84,7 +86,7 @@ mod tests {
         let start = Instant::now();
         let mut db = RedisDb::new();
         db.update_time(start);
-        db.set(b"k".to_vec(), b"v1".to_vec());
+        db.set(b"k".to_vec(), b"v1".to_vec()).unwrap();
         db.expire(b"k", Duration::from_secs(10));
 
         // SET without EX should clear the TTL
