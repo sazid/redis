@@ -180,17 +180,31 @@ pub fn run(config: Config) -> std::io::Result<()> {
 /// true = keep the client connected
 /// false = disconnect the client
 fn process_client_buffer(client: &mut Client, token: Token, db: &mut RedisDb) -> bool {
-    while !client.read_buf.is_empty() {
-        match resp::decode_one(&client.read_buf) {
+    process_buffers(&mut client.read_buf, &mut client.write_buf, token, db)
+}
+
+/// Parse as many complete RESP commands as possible from `read_buf` and append
+/// their encoded responses to `write_buf`.
+///
+/// This is separated from `Client` so pipelining behavior can be tested without
+/// constructing a real TCP socket.
+fn process_buffers(
+    read_buf: &mut Vec<u8>,
+    write_buf: &mut Vec<u8>,
+    token: Token,
+    db: &mut RedisDb,
+) -> bool {
+    while !read_buf.is_empty() {
+        match resp::decode_one(read_buf) {
             Ok((value, remaining)) => {
-                let consumed = client.read_buf.len() - remaining.len();
+                let consumed = read_buf.len() - remaining.len();
 
                 println!("Parsed from {token:?}: {value:?}");
 
                 let response = handle_request(value, db);
-                client.write_buf.extend_from_slice(&response.encode());
+                write_buf.extend_from_slice(&response.encode());
 
-                client.read_buf.drain(..consumed);
+                read_buf.drain(..consumed);
             }
 
             Err(RespError::IncompleteInput) | Err(RespError::MissingCrlf) => return true,
@@ -229,4 +243,92 @@ fn flush_client_write_buffer(client: &mut Client, token: Token) -> io::Result<bo
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_CLIENT: Token = Token(1);
+
+    fn process(read_buf: &mut Vec<u8>, write_buf: &mut Vec<u8>, db: &mut RedisDb) -> bool {
+        process_buffers(read_buf, write_buf, TEST_CLIENT, db)
+    }
+
+    #[test]
+    fn pipelined_ping_commands_produce_ordered_responses() {
+        let mut db = RedisDb::new();
+        let mut read_buf = b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n".to_vec();
+        let mut write_buf = Vec::new();
+
+        assert!(process(&mut read_buf, &mut write_buf, &mut db));
+
+        assert!(read_buf.is_empty());
+        assert_eq!(write_buf, b"+PONG\r\n+PONG\r\n");
+    }
+
+    #[test]
+    fn pipelined_commands_share_db_state() {
+        let mut db = RedisDb::new();
+        let mut read_buf = concat!(
+            "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+            "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+            "*2\r\n$6\r\nEXISTS\r\n$3\r\nfoo\r\n",
+        )
+        .as_bytes()
+        .to_vec();
+        let mut write_buf = Vec::new();
+
+        assert!(process(&mut read_buf, &mut write_buf, &mut db));
+
+        assert!(read_buf.is_empty());
+        assert_eq!(write_buf, b"+OK\r\n$3\r\nbar\r\n:1\r\n");
+    }
+
+    #[test]
+    fn partial_command_waits_for_more_bytes() {
+        let mut db = RedisDb::new();
+        let mut read_buf = b"*1\r\n$4\r\nPI".to_vec();
+        let mut write_buf = Vec::new();
+
+        assert!(process(&mut read_buf, &mut write_buf, &mut db));
+        assert_eq!(read_buf, b"*1\r\n$4\r\nPI");
+        assert!(write_buf.is_empty());
+
+        read_buf.extend_from_slice(b"NG\r\n");
+
+        assert!(process(&mut read_buf, &mut write_buf, &mut db));
+        assert!(read_buf.is_empty());
+        assert_eq!(write_buf, b"+PONG\r\n");
+    }
+
+    #[test]
+    fn complete_commands_are_processed_before_partial_tail() {
+        let mut db = RedisDb::new();
+        let mut read_buf = concat!("*1\r\n$4\r\nPING\r\n", "*1\r\n$4\r\nPI")
+            .as_bytes()
+            .to_vec();
+        let mut write_buf = Vec::new();
+
+        assert!(process(&mut read_buf, &mut write_buf, &mut db));
+
+        assert_eq!(read_buf, b"*1\r\n$4\r\nPI");
+        assert_eq!(write_buf, b"+PONG\r\n");
+
+        read_buf.extend_from_slice(b"NG\r\n");
+
+        assert!(process(&mut read_buf, &mut write_buf, &mut db));
+        assert!(read_buf.is_empty());
+        assert_eq!(write_buf, b"+PONG\r\n+PONG\r\n");
+    }
+
+    #[test]
+    fn protocol_error_disconnects_client() {
+        let mut db = RedisDb::new();
+        let mut read_buf = b"?invalid\r\n".to_vec();
+        let mut write_buf = Vec::new();
+
+        assert!(!process(&mut read_buf, &mut write_buf, &mut db));
+        assert!(write_buf.is_empty());
+    }
 }
