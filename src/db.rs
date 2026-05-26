@@ -110,6 +110,14 @@ impl RedisDb {
         self.memory_used
     }
 
+    pub fn key_count(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn expires_count(&self) -> usize {
+        self.expires.len()
+    }
+
     pub fn active_expire_sample(&mut self) {
         if self.expires.is_empty() {
             return;
