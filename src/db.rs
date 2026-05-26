@@ -9,12 +9,18 @@ const VALUES_ENTRY_OVERHEAD: usize = 64;
 /// Rough estimate for `expires` map entry overhead.
 const EXPIRES_ENTRY_OVERHEAD: usize = 32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RedisDbConfig {
+    pub max_memory: Option<usize>,
+}
+
 pub struct RedisDb {
     values: IndexMap<Vec<u8>, Vec<u8>>,
     expires: IndexMap<Vec<u8>, Instant>,
     current_time: Instant,
     value_memory_used: usize,
     expires_memory_used: usize,
+    config: RedisDbConfig,
 }
 
 #[inline(always)]
@@ -29,12 +35,17 @@ fn expire_entry_memory_cost(key: &[u8]) -> usize {
 
 impl RedisDb {
     pub fn new() -> Self {
+        Self::with_config(RedisDbConfig::default())
+    }
+
+    pub fn with_config(config: RedisDbConfig) -> Self {
         Self {
             values: IndexMap::new(),
             expires: IndexMap::new(),
             current_time: Instant::now(),
             value_memory_used: 0,
             expires_memory_used: 0,
+            config,
         }
     }
 
@@ -128,18 +139,6 @@ impl RedisDb {
             .unwrap_or(i64::MAX)
     }
 
-    pub fn memory_used(&self) -> usize {
-        self.value_memory_used + self.expires_memory_used
-    }
-
-    pub fn key_count(&self) -> usize {
-        self.values.len()
-    }
-
-    pub fn expires_count(&self) -> usize {
-        self.expires.len()
-    }
-
     pub fn active_expire_sample(&mut self) {
         if self.expires.is_empty() {
             return;
@@ -178,6 +177,22 @@ impl RedisDb {
                 break;
             }
         }
+    }
+
+    pub fn memory_used(&self) -> usize {
+        self.value_memory_used + self.expires_memory_used
+    }
+
+    pub fn key_count(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn expires_count(&self) -> usize {
+        self.expires.len()
+    }
+
+    pub fn max_memory(&self) -> Option<usize> {
+        self.config.max_memory
     }
 }
 
@@ -718,5 +733,21 @@ mod tests {
             cost,
             key.len() + std::mem::size_of::<Instant>() + EXPIRES_ENTRY_OVERHEAD
         );
+    }
+
+    #[test]
+    fn default_config_has_no_max_memory() {
+        let db = RedisDb::new();
+
+        assert_eq!(db.max_memory(), None);
+    }
+
+    #[test]
+    fn with_config_stores_max_memory() {
+        let db = RedisDb::with_config(RedisDbConfig {
+            max_memory: Some(1024),
+        });
+
+        assert_eq!(db.max_memory(), Some(1024));
     }
 }
