@@ -258,6 +258,43 @@ impl RedisDb {
         Some(key.clone())
     }
 
+    pub(crate) fn random_key_with_ttl(&self) -> Option<Vec<u8>> {
+        if self.expires.is_empty() {
+            return None;
+        }
+
+        let index = fastrand::usize(..self.expires.len());
+        let (key, _) = self.expires.get_index(index)?;
+        Some(key.clone())
+    }
+
+    pub(crate) fn key_with_shortest_ttl(&self) -> Option<Vec<u8>> {
+        if self.expires.is_empty() {
+            return None;
+        }
+
+        let sample_size = self.expires.len().min(20);
+
+        let mut index = fastrand::usize(..self.expires.len());
+        let (mut best_key, mut best_expiry) = match self.expires.get_index(index) {
+            Some((key, &expiry)) => (key.clone(), expiry),
+            None => return None,
+        };
+
+        for _ in 0..sample_size - 1 {
+            index = fastrand::usize(..self.expires.len());
+            let Some((key, &expires_at)) = self.expires.get_index(index) else {
+                continue;
+            };
+            if expires_at < best_expiry {
+                best_expiry = expires_at;
+                best_key = key.clone();
+            }
+        }
+
+        Some(best_key)
+    }
+
     pub fn memory_used(&self) -> usize {
         self.value_memory_used + self.expires_memory_used
     }
