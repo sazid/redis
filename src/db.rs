@@ -244,6 +244,20 @@ impl RedisDb {
         }
     }
 
+    pub(crate) fn eviction_policy(&self) -> EvictionPolicy {
+        self.config.eviction_policy
+    }
+
+    pub(crate) fn random_key(&self) -> Option<Vec<u8>> {
+        if self.values.is_empty() {
+            return None;
+        }
+
+        let index = fastrand::usize(..self.values.len());
+        let (key, _) = self.values.get_index(index)?;
+        Some(key.clone())
+    }
+
     pub fn memory_used(&self) -> usize {
         self.value_memory_used + self.expires_memory_used
     }
@@ -816,5 +830,37 @@ mod tests {
         });
 
         assert_eq!(db.max_memory(), Some(1024));
+    }
+
+    #[test]
+    fn no_max_memory_does_not_evict() {
+        let mut db = RedisDb::new();
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
+        assert!(db.enforce_memory_limit().is_ok());
+    }
+
+    #[test]
+    fn allkeys_random_evicts_until_under_limit() {
+        let config = RedisDbConfig {
+            max_memory: Some(value_entry_memory_cost(b"k", b"v") * 2),
+            ..RedisDbConfig::default()
+        };
+        let mut db = RedisDb::with_config(config);
+        for i in 0..10 {
+            let _ = db.set(format!("k{i}").into_bytes(), b"v".to_vec());
+        }
+        db.enforce_memory_limit().unwrap();
+        assert!(db.memory_used() <= db.max_memory().unwrap());
+    }
+
+    #[test]
+    fn noeviction_rejects_oversized_write() {
+        let config = RedisDbConfig {
+            max_memory: Some(100),
+            eviction_policy: EvictionPolicy::NoEviction,
+        };
+        let mut db = RedisDb::with_config(config);
+        let result = db.set(b"big".to_vec(), vec![0u8; 1000]);
+        assert_eq!(result, Err(RedisDbError::OutOfMemory));
     }
 }
