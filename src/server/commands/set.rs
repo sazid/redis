@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use super::{value_as_bytes, value_as_i64};
-use crate::{db::RedisDb, resp::RespValue};
+use crate::{
+    db::{RedisDb, RedisDbError},
+    resp::RespValue,
+};
 
 pub(super) fn handle_set(items: &[RespValue], db: &mut RedisDb) -> RespValue {
     match items {
@@ -41,7 +44,7 @@ fn set_key_value(
     };
 
     if let Err(err) = db.set(key.to_owned(), value.to_owned()) {
-        return RespValue::Error(format!("ERR {err:?}"));
+        return db_error_response(err);
     }
     if let Some(duration) = expiry {
         db.expire(key, duration);
@@ -49,12 +52,23 @@ fn set_key_value(
     RespValue::SimpleString("OK".to_owned())
 }
 
+fn db_error_response(err: RedisDbError) -> RespValue {
+    match err {
+        RedisDbError::OutOfMemory => {
+            RespValue::Error("OOM command not allowed when used memory > 'maxmemory'".to_owned())
+        }
+        RedisDbError::NoEvictableKeys => {
+            RespValue::Error("OOM command not allowed; no evictable keys".to_owned())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::resp::RespValue;
+    use crate::{db::RedisDbConfig, eviction::EvictionPolicy, resp::RespValue};
 
     fn resp_bulk(s: &'static str) -> RespValue {
         RespValue::BulkString(Some(s.as_bytes().to_vec()))
@@ -217,5 +231,51 @@ mod tests {
         );
         assert_eq!(result, RespValue::SimpleString("OK".to_owned()));
         assert_eq!(db.get(b"k"), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn set_returns_client_facing_oom_message_for_noeviction() {
+        let config = RedisDbConfig {
+            max_memory: Some(100),
+            eviction_policy: EvictionPolicy::NoEviction,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("big"),
+                RespValue::BulkString(Some(vec![b'x'; 1000])),
+            ],
+            &mut db,
+        );
+
+        assert_eq!(
+            result,
+            RespValue::Error("OOM command not allowed when used memory > 'maxmemory'".to_owned())
+        );
+    }
+
+    #[test]
+    fn set_returns_client_facing_oom_message_when_no_keys_are_evictable() {
+        let config = RedisDbConfig {
+            max_memory: Some(100),
+            eviction_policy: EvictionPolicy::VolatileRandom,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        let result = handle_set(
+            &[
+                resp_bulk("SET"),
+                resp_bulk("no_ttl"),
+                RespValue::BulkString(Some(vec![b'x'; 1000])),
+            ],
+            &mut db,
+        );
+
+        assert_eq!(
+            result,
+            RespValue::Error("OOM command not allowed; no evictable keys".to_owned())
+        );
     }
 }

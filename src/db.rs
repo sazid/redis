@@ -900,4 +900,57 @@ mod tests {
         let result = db.set(b"big".to_vec(), vec![0u8; 1000]);
         assert_eq!(result, Err(RedisDbError::OutOfMemory));
     }
+
+    #[test]
+    fn volatile_random_evicts_only_keys_with_ttl() {
+        let config = RedisDbConfig {
+            max_memory: Some(value_entry_memory_cost(b"k", b"v") * 5),
+            eviction_policy: EvictionPolicy::VolatileRandom,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        db.set(b"persistent".to_vec(), b"v".to_vec()).unwrap();
+        for i in 0..10 {
+            let key = format!("k{i}").into_bytes();
+            db.set(key.clone(), b"v".to_vec()).unwrap();
+            db.expire(&key, Duration::from_secs(100));
+        }
+
+        assert!(db.exists(b"persistent"));
+        assert!(db.memory_used() <= db.max_memory().unwrap());
+    }
+
+    #[test]
+    fn volatile_random_returns_error_when_no_keys_have_ttl() {
+        let config = RedisDbConfig {
+            max_memory: Some(100),
+            eviction_policy: EvictionPolicy::VolatileRandom,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        let result = db.set(b"no_ttl".to_vec(), vec![0u8; 1000]);
+        assert_eq!(result, Err(RedisDbError::NoEvictableKeys));
+    }
+
+    #[test]
+    fn volatile_ttl_evicts_key_with_shortest_ttl() {
+        let start = Instant::now();
+        let config = RedisDbConfig {
+            max_memory: Some(value_entry_memory_cost(b"k", b"v") * 3),
+            eviction_policy: EvictionPolicy::VolatileTTL,
+        };
+        let mut db = RedisDb::with_config(config);
+        db.update_time(start);
+
+        db.set(b"long".to_vec(), b"v".to_vec()).unwrap();
+        db.expire(b"long", Duration::from_secs(1000));
+
+        db.set(b"short".to_vec(), b"v".to_vec()).unwrap();
+        db.expire(b"short", Duration::from_secs(10));
+
+        db.set(b"overflow".to_vec(), b"v".to_vec()).unwrap();
+
+        assert!(db.exists(b"long"));
+        assert!(!db.exists(b"short"));
+    }
 }
