@@ -26,19 +26,53 @@ impl Default for RedisDbConfig {
     }
 }
 
+struct ValueEntry {
+    value: Vec<u8>,
+    eviction: EvictionEntryMeta,
+}
+
+enum EvictionEntryMeta {
+    None,
+    Sieve { weight: u8 },
+    // Lru { last_accessed: u64 },
+}
+
+enum EvictionState {
+    None,
+    Sieve { hand: usize },
+    // Lru { clock: u64 },
+}
+
 pub struct RedisDb {
-    values: IndexMap<Vec<u8>, Vec<u8>>,
+    values: IndexMap<Vec<u8>, ValueEntry>,
     expires: IndexMap<Vec<u8>, Instant>,
     current_time: Instant,
+
     value_memory_used: usize,
     expires_memory_used: usize,
+
     config: RedisDbConfig,
+    eviction_state: EvictionState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedisDbError {
     OutOfMemory,
     NoEvictableKeys,
+}
+
+fn eviction_state_for(policy: EvictionPolicy) -> EvictionState {
+    match policy {
+        EvictionPolicy::AllKeysSieve => EvictionState::Sieve { hand: 0 },
+        _ => EvictionState::None,
+    }
+}
+
+fn entry_meta_for(policy: EvictionPolicy) -> EvictionEntryMeta {
+    match policy {
+        EvictionPolicy::AllKeysSieve => EvictionEntryMeta::Sieve { weight: 0 },
+        _ => EvictionEntryMeta::None,
+    }
 }
 
 #[inline(always)]
@@ -57,12 +91,17 @@ impl RedisDb {
     }
 
     pub fn with_config(config: RedisDbConfig) -> Self {
+        let eviction_state = eviction_state_for(config.eviction_policy);
+
         Self {
             values: IndexMap::new(),
             expires: IndexMap::new(),
             current_time: Instant::now(),
+
             value_memory_used: 0,
             expires_memory_used: 0,
+
+            eviction_state,
             config,
         }
     }
@@ -88,11 +127,16 @@ impl RedisDb {
 
         // If overwriting, free old value memory first.
         if let Some(old_value) = self.values.get(&key) {
-            self.value_memory_used -= value_entry_memory_cost(&key, old_value);
+            self.value_memory_used -= value_entry_memory_cost(&key, &old_value.value);
         }
 
         self.value_memory_used += entry_cost;
-        self.values.insert(key.clone(), value);
+
+        let entry = ValueEntry {
+            value,
+            eviction: entry_meta_for(self.config.eviction_policy),
+        };
+        self.values.insert(key.clone(), entry);
 
         // Redis SET clears existing TTL unless KEEPTTL is used.
         if self.expires.swap_remove(&key).is_some() {
@@ -116,7 +160,7 @@ impl RedisDb {
         let mut projected = self.memory_used();
 
         if let Some(old_value) = self.values.get(key) {
-            projected -= value_entry_memory_cost(key, old_value);
+            projected -= value_entry_memory_cost(key, &old_value.value);
         }
 
         projected += value_entry_memory_cost(key, value);
@@ -141,7 +185,7 @@ impl RedisDb {
             return None;
         }
 
-        self.values.get(key).cloned()
+        self.values.get(key).map(|entry| entry.value.clone())
     }
 
     pub fn exists(&mut self, key: &[u8]) -> bool {
@@ -154,8 +198,8 @@ impl RedisDb {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> bool {
-        if let Some(value) = self.values.swap_remove(key) {
-            self.value_memory_used -= value_entry_memory_cost(key, &value);
+        if let Some(entry) = self.values.swap_remove(key) {
+            self.value_memory_used -= value_entry_memory_cost(key, &entry.value);
 
             if self.expires.swap_remove(key).is_some() {
                 self.expires_memory_used -= expire_entry_memory_cost(key);
