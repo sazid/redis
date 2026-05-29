@@ -38,48 +38,28 @@ pub(crate) fn enforce_memory_limit(db: &mut RedisDb) -> Result<(), EvictionError
         match db.eviction_policy() {
             EvictionPolicy::NoEviction => return Err(EvictionError::MemoryLimitExceeded),
             EvictionPolicy::AllKeysRandom => {
-                if !evict_all_keys_random(db) {
+                if !db.evict_all_keys_random() {
                     return Err(EvictionError::NoEvictableKeys);
                 }
             }
             EvictionPolicy::VolatileRandom => {
-                if !evict_volatile_random(db) {
+                if !db.evict_volatile_random() {
                     return Err(EvictionError::NoEvictableKeys);
                 }
             }
             EvictionPolicy::VolatileTTL => {
-                if !evict_volatile_ttl(db) {
+                if !db.evict_volatile_ttl() {
                     return Err(EvictionError::NoEvictableKeys);
                 }
             }
             EvictionPolicy::AllKeysLRU => todo!(),
-            EvictionPolicy::AllKeysSieve => todo!(),
+            EvictionPolicy::AllKeysSieve => {
+                if !db.evict_sieve() {
+                    return Err(EvictionError::NoEvictableKeys);
+                }
+            }
         }
     }
 
     Ok(())
-}
-
-fn evict_all_keys_random(db: &mut RedisDb) -> bool {
-    let Some(key) = db.random_key() else {
-        return false;
-    };
-
-    db.delete(&key)
-}
-
-fn evict_volatile_random(db: &mut RedisDb) -> bool {
-    let Some(key) = db.random_key_with_ttl() else {
-        return false;
-    };
-
-    db.delete(&key)
-}
-
-fn evict_volatile_ttl(db: &mut RedisDb) -> bool {
-    let Some(key) = db.key_with_shortest_ttl() else {
-        return false;
-    };
-
-    db.delete(&key)
 }

@@ -109,7 +109,10 @@ impl RedisDb {
     pub fn update_time(&mut self, now: Instant) {
         self.current_time = now;
     }
+}
 
+// Core key-value methods.
+impl RedisDb {
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), RedisDbError> {
         if self.should_reject_write(&key, &value) {
             return Err(RedisDbError::OutOfMemory);
@@ -185,6 +188,7 @@ impl RedisDb {
             return None;
         }
 
+        self.touch_key(key);
         self.values.get(key).map(|entry| entry.value.clone())
     }
 
@@ -194,6 +198,7 @@ impl RedisDb {
             return false;
         }
 
+        self.touch_key(key);
         self.values.contains_key(key)
     }
 
@@ -210,7 +215,10 @@ impl RedisDb {
             false
         }
     }
+}
 
+// Expiry methods.
+impl RedisDb {
     pub fn expire(&mut self, key: &[u8], ttl: Duration) -> bool {
         if !self.exists(key) {
             return false;
@@ -287,12 +295,11 @@ impl RedisDb {
             }
         }
     }
+}
 
-    pub(crate) fn eviction_policy(&self) -> EvictionPolicy {
-        self.config.eviction_policy
-    }
-
-    pub(crate) fn random_key(&self) -> Option<Vec<u8>> {
+// Eviction key-selection helpers.
+impl RedisDb {
+    fn random_key(&self) -> Option<Vec<u8>> {
         if self.values.is_empty() {
             return None;
         }
@@ -302,7 +309,7 @@ impl RedisDb {
         Some(key.clone())
     }
 
-    pub(crate) fn random_key_with_ttl(&self) -> Option<Vec<u8>> {
+    fn random_key_with_ttl(&self) -> Option<Vec<u8>> {
         if self.expires.is_empty() {
             return None;
         }
@@ -312,12 +319,29 @@ impl RedisDb {
         Some(key.clone())
     }
 
-    pub(crate) fn key_with_shortest_ttl(&self) -> Option<Vec<u8>> {
+    fn key_with_shortest_ttl(&self) -> Option<Vec<u8>> {
         if self.expires.is_empty() {
             return None;
         }
 
         let sample_size = self.expires.len().min(20);
+
+        if sample_size == self.expires.len() {
+            let mut expiries = self.expires.iter();
+            let (mut best_key, mut best_expiry) = match expiries.next() {
+                Some((key, &expiry)) => (key.clone(), expiry),
+                None => return None,
+            };
+
+            for (key, &expires_at) in expiries {
+                if expires_at < best_expiry {
+                    best_expiry = expires_at;
+                    best_key = key.clone();
+                }
+            }
+
+            return Some(best_key);
+        }
 
         let mut index = fastrand::usize(..self.expires.len());
         let (mut best_key, mut best_expiry) = match self.expires.get_index(index) {
@@ -338,7 +362,10 @@ impl RedisDb {
 
         Some(best_key)
     }
+}
 
+// Statistical methods.
+impl RedisDb {
     pub fn memory_used(&self) -> usize {
         self.value_memory_used + self.expires_memory_used
     }
@@ -353,6 +380,54 @@ impl RedisDb {
 
     pub fn max_memory(&self) -> Option<usize> {
         self.config.max_memory
+    }
+}
+
+// Cache related methods.
+impl RedisDb {
+    fn touch_key(&mut self, key: &[u8]) {
+        let Some(entry) = self.values.get_mut(key) else {
+            return;
+        };
+
+        match &mut entry.eviction {
+            EvictionEntryMeta::Sieve { weight } => {
+                *weight = 1;
+            }
+            EvictionEntryMeta::None => {}
+        }
+    }
+
+    pub(crate) fn eviction_policy(&self) -> EvictionPolicy {
+        self.config.eviction_policy
+    }
+
+    pub(crate) fn evict_all_keys_random(&mut self) -> bool {
+        let Some(key) = self.random_key() else {
+            return false;
+        };
+
+        self.delete(&key)
+    }
+
+    pub(crate) fn evict_volatile_random(&mut self) -> bool {
+        let Some(key) = self.random_key_with_ttl() else {
+            return false;
+        };
+
+        self.delete(&key)
+    }
+
+    pub(crate) fn evict_volatile_ttl(&mut self) -> bool {
+        let Some(key) = self.key_with_shortest_ttl() else {
+            return false;
+        };
+
+        self.delete(&key)
+    }
+
+    pub(crate) fn evict_sieve(&mut self) -> bool {
+        todo!()
     }
 }
 
