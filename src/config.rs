@@ -12,7 +12,7 @@ const AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "perds",
+    name = "redis",
     author = AUTHOR,
     version = VERSION,
     about,

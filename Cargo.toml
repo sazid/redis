@@ -5,9 +5,9 @@ edition = "2024"
 build = "src/build.rs"
 
 [dependencies]
-clap = { workspace = true }
-mio = { workspace = true }
-slab = { workspace = true }
-indexmap = { workspace = true }
-fastrand = { workspace = true }
-mimalloc = { workspace = true }
+clap = { version = "4.6.1", features = ["derive"] }
+mio = { version = "1.2.0", features = ["net", "os-poll"] }
+slab = "0.4.12"
+indexmap = { version = "2.14.0", features = ["std"] }
+fastrand = "2.4.1"
+mimalloc = "0.1.52"
