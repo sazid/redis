@@ -14,39 +14,75 @@ use self::{
 };
 use crate::{db::RedisDb, resp::RespValue};
 
-pub(super) fn handle_request(value: RespValue, db: &mut RedisDb) -> RespValue {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CommandOutcome {
+    pub(super) response: RespValue,
+    pub(super) persist: Option<RespValue>,
+}
+
+#[inline(always)]
+fn without_persist(response: RespValue) -> CommandOutcome {
+    CommandOutcome {
+        response,
+        persist: None,
+    }
+}
+
+#[inline(always)]
+fn persist_if(response: RespValue, command: RespValue, should_persist: bool) -> CommandOutcome {
+    if should_persist {
+        CommandOutcome {
+            response,
+            persist: Some(command),
+        }
+    } else {
+        without_persist(response)
+    }
+}
+
+pub(super) fn handle_request(value: RespValue, db: &mut RedisDb) -> CommandOutcome {
+    let original_command = value.clone();
+
     let RespValue::Array(Some(items)) = value else {
-        return RespValue::Error("ERR expected array command".to_owned());
+        return without_persist(RespValue::Error("ERR expected array command".to_owned()));
     };
 
     if items.is_empty() {
-        return RespValue::Error("ERR empty command".to_owned());
+        return without_persist(RespValue::Error("ERR empty command".to_owned()));
     }
 
     let Some(command_name) = value_as_bytes(&items[0]) else {
-        return RespValue::Error("ERR command name must be a bulk string".to_owned());
+        return without_persist(RespValue::Error(
+            "ERR command name must be a bulk string".to_owned(),
+        ));
     };
 
     if command_name.eq_ignore_ascii_case(b"PING") {
-        handle_ping(&items)
+        without_persist(handle_ping(&items))
     } else if command_name.eq_ignore_ascii_case(b"ECHO") {
-        handle_echo(&items)
+        without_persist(handle_echo(&items))
     } else if command_name.eq_ignore_ascii_case(b"SET") {
-        handle_set(&items, db)
+        let response = handle_set(&items, db);
+        let should_persist = matches!(&response, RespValue::SimpleString(value) if value == "OK");
+        persist_if(response, original_command, should_persist)
     } else if command_name.eq_ignore_ascii_case(b"GET") {
-        handle_get(&items, db)
+        without_persist(handle_get(&items, db))
     } else if command_name.eq_ignore_ascii_case(b"EXPIRE") {
-        handle_expire(&items, db)
+        let response = handle_expire(&items, db);
+        let should_persist = matches!(&response, RespValue::Integer(value) if *value == 1);
+        persist_if(response, original_command, should_persist)
     } else if command_name.eq_ignore_ascii_case(b"EXISTS") {
-        handle_exists(&items, db)
+        without_persist(handle_exists(&items, db))
     } else if command_name.eq_ignore_ascii_case(b"TTL") {
-        handle_ttl(&items, db)
+        without_persist(handle_ttl(&items, db))
     } else if command_name.eq_ignore_ascii_case(b"DEL") {
-        handle_del(&items, db)
+        let response = handle_del(&items, db);
+        let should_persist = matches!(&response, RespValue::Integer(value) if *value > 0);
+        persist_if(response, original_command, should_persist)
     } else if command_name.eq_ignore_ascii_case(b"INFO") {
-        handle_info(&items, db)
+        without_persist(handle_info(&items, db))
     } else {
-        RespValue::Error("ERR unknown command".to_owned())
+        without_persist(RespValue::Error("ERR unknown command".to_owned()))
     }
 }
 
@@ -90,26 +126,30 @@ mod tests {
         RespValue::Array(Some(items.to_vec()))
     }
 
+    fn handle_response(value: RespValue, db: &mut RedisDb) -> RespValue {
+        handle_request(value, db).response
+    }
+
     // --- PING ---
 
     #[test]
     fn ping_without_args() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("PING")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("PING")]), &mut db);
         assert_eq!(result, RespValue::SimpleString("PONG".to_owned()));
     }
 
     #[test]
     fn ping_with_message() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("PING"), resp_bulk("hello")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("PING"), resp_bulk("hello")]), &mut db);
         assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
     }
 
     #[test]
     fn ping_case_insensitive() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("ping")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("ping")]), &mut db);
         assert_eq!(result, RespValue::SimpleString("PONG".to_owned()));
     }
 
@@ -118,7 +158,7 @@ mod tests {
     #[test]
     fn echo_returns_message() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("ECHO"), resp_bulk("world")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("ECHO"), resp_bulk("world")]), &mut db);
         assert_eq!(result, RespValue::BulkString(Some(b"world".to_vec())));
     }
 
@@ -171,21 +211,44 @@ mod tests {
         assert_eq!(db.ttl(b"k"), 10);
     }
 
+    #[test]
+    fn successful_set_persists_original_command() {
+        let mut db = RedisDb::new();
+        let request = command(&[resp_bulk("set"), resp_bulk("k"), resp_bulk("v")]);
+
+        let outcome = handle_request(request.clone(), &mut db);
+
+        assert_eq!(outcome.response, RespValue::SimpleString("OK".to_owned()));
+        assert_eq!(outcome.persist, Some(request));
+    }
+
     // --- GET ---
 
     #[test]
     fn get_returns_stored_value() {
         let mut db = RedisDb::new();
         db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
-        let result = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::BulkString(Some(b"v".to_vec())));
     }
 
     #[test]
     fn get_returns_nil_for_missing() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("GET"), resp_bulk("missing")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("GET"), resp_bulk("missing")]), &mut db);
         assert_eq!(result, RespValue::BulkString(None));
+    }
+
+    #[test]
+    fn get_does_not_persist() {
+        let mut db = RedisDb::new();
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
+        let request = command(&[resp_bulk("GET"), resp_bulk("k")]);
+
+        let outcome = handle_request(request, &mut db);
+
+        assert_eq!(outcome.response, RespValue::BulkString(Some(b"v".to_vec())));
+        assert_eq!(outcome.persist, None);
     }
 
     // --- EXPIRE ---
@@ -194,7 +257,7 @@ mod tests {
     fn expire_sets_ttl() {
         let mut db = RedisDb::new();
         db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
-        let result = handle_request(
+        let result = handle_response(
             command(&[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(10)]),
             &mut db,
         );
@@ -205,7 +268,7 @@ mod tests {
     #[test]
     fn expire_returns_0_for_missing() {
         let mut db = RedisDb::new();
-        let result = handle_request(
+        let result = handle_response(
             command(&[resp_bulk("EXPIRE"), resp_bulk("missing"), resp_int(10)]),
             &mut db,
         );
@@ -223,6 +286,29 @@ mod tests {
         assert_eq!(db.get(b"k"), None);
     }
 
+    #[test]
+    fn successful_expire_persists_original_command() {
+        let mut db = RedisDb::new();
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
+        let request = command(&[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(10)]);
+
+        let outcome = handle_request(request.clone(), &mut db);
+
+        assert_eq!(outcome.response, RespValue::Integer(1));
+        assert_eq!(outcome.persist, Some(request));
+    }
+
+    #[test]
+    fn expire_missing_key_does_not_persist() {
+        let mut db = RedisDb::new();
+        let request = command(&[resp_bulk("EXPIRE"), resp_bulk("missing"), resp_int(10)]);
+
+        let outcome = handle_request(request, &mut db);
+
+        assert_eq!(outcome.response, RespValue::Integer(0));
+        assert_eq!(outcome.persist, None);
+    }
+
     // --- EXISTS ---
 
     #[test]
@@ -230,7 +316,7 @@ mod tests {
         let mut db = RedisDb::new();
         db.set(b"k1".to_vec(), b"v1".to_vec()).unwrap();
         db.set(b"k2".to_vec(), b"v2".to_vec()).unwrap();
-        let result = handle_request(
+        let result = handle_response(
             command(&[
                 resp_bulk("EXISTS"),
                 resp_bulk("k1"),
@@ -251,14 +337,14 @@ mod tests {
         db.update_time(start);
         db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         db.expire(b"k", std::time::Duration::from_secs(10));
-        let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
     }
 
     #[test]
     fn ttl_returns_minus_2_for_missing() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("missing")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("TTL"), resp_bulk("missing")]), &mut db);
         assert_eq!(result, RespValue::Integer(-2));
     }
 
@@ -266,7 +352,7 @@ mod tests {
     fn ttl_returns_minus_1_for_no_expiry() {
         let mut db = RedisDb::new();
         db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
-        let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::Integer(-1));
     }
 
@@ -275,28 +361,28 @@ mod tests {
     #[test]
     fn non_array_request_returns_error() {
         let mut db = RedisDb::new();
-        let result = handle_request(RespValue::BulkString(Some(b"SET".to_vec())), &mut db);
+        let result = handle_response(RespValue::BulkString(Some(b"SET".to_vec())), &mut db);
         assert!(matches!(result, RespValue::Error(e) if e.contains("expected array")));
     }
 
     #[test]
     fn empty_array_returns_error() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[]), &mut db);
+        let result = handle_response(command(&[]), &mut db);
         assert!(matches!(result, RespValue::Error(e) if e.contains("empty command")));
     }
 
     #[test]
     fn unknown_command_returns_error() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("UNKNOWN")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("UNKNOWN")]), &mut db);
         assert!(matches!(result, RespValue::Error(e) if e.contains("unknown command")));
     }
 
     #[test]
     fn command_name_must_be_bulk_string() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_int(123)]), &mut db);
+        let result = handle_response(command(&[resp_int(123)]), &mut db);
         assert!(matches!(result, RespValue::Error(e) if e.contains("bulk string")));
     }
 
@@ -307,7 +393,7 @@ mod tests {
         let mut db = RedisDb::new();
         db.set(b"k1".to_vec(), b"v1".to_vec()).unwrap();
         db.set(b"k2".to_vec(), b"v2".to_vec()).unwrap();
-        let result = handle_request(
+        let result = handle_response(
             command(&[
                 resp_bulk("DEL"),
                 resp_bulk("k1"),
@@ -322,7 +408,7 @@ mod tests {
     #[test]
     fn del_returns_zero_for_missing_keys() {
         let mut db = RedisDb::new();
-        let result = handle_request(command(&[resp_bulk("DEL"), resp_bulk("missing")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("DEL"), resp_bulk("missing")]), &mut db);
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -330,8 +416,31 @@ mod tests {
     fn del_case_insensitive() {
         let mut db = RedisDb::new();
         db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
-        let result = handle_request(command(&[resp_bulk("del"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("del"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::Integer(1));
+    }
+
+    #[test]
+    fn successful_del_persists_original_command() {
+        let mut db = RedisDb::new();
+        db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
+        let request = command(&[resp_bulk("del"), resp_bulk("k")]);
+
+        let outcome = handle_request(request.clone(), &mut db);
+
+        assert_eq!(outcome.response, RespValue::Integer(1));
+        assert_eq!(outcome.persist, Some(request));
+    }
+
+    #[test]
+    fn del_missing_key_does_not_persist() {
+        let mut db = RedisDb::new();
+        let request = command(&[resp_bulk("DEL"), resp_bulk("missing")]);
+
+        let outcome = handle_request(request, &mut db);
+
+        assert_eq!(outcome.response, RespValue::Integer(0));
+        assert_eq!(outcome.persist, None);
     }
 
     // --- MULTI-COMMAND SEQUENCES ---
@@ -343,7 +452,7 @@ mod tests {
             command(&[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v")]),
             &mut db,
         );
-        let result = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::BulkString(Some(b"v".to_vec())));
     }
 
@@ -393,7 +502,7 @@ mod tests {
         db.update_time(start + std::time::Duration::from_secs(5));
 
         // Key should still be accessible
-        let result = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::BulkString(Some(b"v".to_vec())));
     }
 
@@ -416,7 +525,7 @@ mod tests {
         db.update_time(start + std::time::Duration::from_secs(5));
 
         // Key should be expired (lazy deletion)
-        let result = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::BulkString(None));
     }
 
@@ -438,17 +547,17 @@ mod tests {
         );
 
         // TTL should be ~10
-        let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
 
         // After 5 seconds, TTL should be ~5
         db.update_time(start + std::time::Duration::from_secs(5));
-        let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert!(matches!(result, RespValue::Integer(n) if (4..=5).contains(&n)));
 
         // After expiry, TTL should be gone
         db.update_time(start + std::time::Duration::from_secs(10));
-        let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::Integer(-2));
     }
 
@@ -467,7 +576,7 @@ mod tests {
             &mut db,
         );
 
-        let result = handle_request(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("TTL"), resp_bulk("k")]), &mut db);
         assert!(matches!(result, RespValue::Integer(n) if (9..=10).contains(&n)));
     }
 
@@ -488,7 +597,7 @@ mod tests {
             &mut db,
         );
 
-        let result = handle_request(
+        let result = handle_response(
             command(&[
                 resp_bulk("EXISTS"),
                 resp_bulk("k1"),
@@ -509,14 +618,14 @@ mod tests {
             command(&[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v1")]),
             &mut db,
         );
-        let r1 = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let r1 = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(r1, RespValue::BulkString(Some(b"v1".to_vec())));
 
         handle_request(
             command(&[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v2")]),
             &mut db,
         );
-        let r2 = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let r2 = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(r2, RespValue::BulkString(Some(b"v2".to_vec())));
     }
 
@@ -529,12 +638,12 @@ mod tests {
             &mut db,
         );
 
-        let result = handle_request(command(&[resp_bulk("EXISTS"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("EXISTS"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::Integer(1));
 
         handle_request(command(&[resp_bulk("DEL"), resp_bulk("k")]), &mut db);
 
-        let result = handle_request(command(&[resp_bulk("EXISTS"), resp_bulk("k")]), &mut db);
+        let result = handle_response(command(&[resp_bulk("EXISTS"), resp_bulk("k")]), &mut db);
         assert_eq!(result, RespValue::Integer(0));
     }
 
@@ -546,12 +655,12 @@ mod tests {
             command(&[resp_bulk("SET"), resp_bulk("k"), resp_bulk("v")]),
             &mut db,
         );
-        let r1 = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let r1 = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(r1, RespValue::BulkString(Some(b"v".to_vec())));
 
         handle_request(command(&[resp_bulk("DEL"), resp_bulk("k")]), &mut db);
 
-        let r2 = handle_request(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
+        let r2 = handle_response(command(&[resp_bulk("GET"), resp_bulk("k")]), &mut db);
         assert_eq!(r2, RespValue::BulkString(None));
     }
 }

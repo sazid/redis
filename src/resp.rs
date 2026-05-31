@@ -1,8 +1,3 @@
-//! RESP (Redis Serialization Protocol) value types and parser scaffolding.
-//!
-//! Implement the parser piece-by-piece and use the tests at the bottom of this
-//! file to guide you.
-
 /// A parsed RESP2 value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RespValue {

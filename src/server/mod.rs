@@ -201,8 +201,12 @@ fn process_buffers(
 
                 println!("Parsed from {token:?}: {value:?}");
 
-                let response = handle_request(value, db);
-                write_buf.extend_from_slice(&response.encode());
+                let outcome = handle_request(value, db);
+                if let Some(_command) = &outcome.persist {
+                    // TODO: append to AOF before writing response.
+                }
+
+                write_buf.extend_from_slice(&outcome.response.encode());
 
                 read_buf.drain(..consumed);
             }
