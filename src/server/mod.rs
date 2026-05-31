@@ -42,6 +42,9 @@ fn replay_aof(path: impl AsRef<std::path::Path>, db: &mut RedisDb) -> io::Result
         Err(err) => return Err(err),
     };
 
+    println!("Replaying data...");
+    let mut command_count = 0;
+
     while !bytes.is_empty() {
         let (value, remaining) = resp::decode_one(&bytes)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}")))?;
@@ -57,8 +60,12 @@ fn replay_aof(path: impl AsRef<std::path::Path>, db: &mut RedisDb) -> io::Result
             ));
         }
 
+        command_count += 1;
+
         bytes.drain(..consumed);
     }
+
+    println!("Done, replayed {command_count} commands.");
 
     Ok(())
 }
