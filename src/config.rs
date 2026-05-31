@@ -31,7 +31,7 @@ pub struct Config {
     pub aof_enabled: bool,
 
     /// Path to the append-only file
-    #[arg(long, default_value = "appendonly.aof")]
+    #[arg(long, default_value = "db.aof")]
     pub aof_path: String,
 
     /// When to flush AOF writes to disk
