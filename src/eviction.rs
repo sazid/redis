@@ -6,6 +6,7 @@ pub enum EvictionPolicy {
     VolatileRandom,
     VolatileTTL,
     AllKeysRandom,
+    #[allow(dead_code)]
     AllKeysLRU,
     AllKeysSieve,
 }
@@ -19,6 +20,21 @@ impl std::fmt::Display for EvictionPolicy {
             EvictionPolicy::VolatileTTL => write!(f, "volatile-ttl"),
             EvictionPolicy::AllKeysLRU => write!(f, "allkeys-lru"),
             EvictionPolicy::AllKeysSieve => write!(f, "allkeys-sieve"),
+        }
+    }
+}
+
+impl std::str::FromStr for EvictionPolicy {
+    type Err = String;
+
+    fn from_str(policy: &str) -> Result<Self, Self::Err> {
+        match policy.to_ascii_lowercase().as_str() {
+            "noeviction" => Ok(EvictionPolicy::NoEviction),
+            "allkeys-random" => Ok(EvictionPolicy::AllKeysRandom),
+            "volatile-random" => Ok(EvictionPolicy::VolatileRandom),
+            "volatile-ttl" => Ok(EvictionPolicy::VolatileTTL),
+            "allkeys-sieve" => Ok(EvictionPolicy::AllKeysSieve),
+            _ => Err(format!("unsupported eviction policy: {policy}")),
         }
     }
 }

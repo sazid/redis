@@ -203,17 +203,41 @@ impl RedisDb {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> bool {
-        if let Some(entry) = self.values.swap_remove(key) {
-            self.value_memory_used -= value_entry_memory_cost(key, &entry.value);
+        let Some(index) = self.values.get_index_of(key) else {
+            return false;
+        };
 
-            if self.expires.swap_remove(key).is_some() {
-                self.expires_memory_used -= expire_entry_memory_cost(key);
-            }
+        let Some(entry) = self.values.swap_remove(key) else {
+            return false;
+        };
 
-            true
-        } else {
-            false
+        self.value_memory_used -= value_entry_memory_cost(key, &entry.value);
+
+        if self.expires.swap_remove(key).is_some() {
+            self.expires_memory_used -= expire_entry_memory_cost(key);
         }
+
+        match &mut self.eviction_state {
+            EvictionState::None => (),
+            EvictionState::Sieve { hand } => {
+                let old_len = self.values.len() + 1;
+
+                if self.values.is_empty() {
+                    *hand = 0;
+                } else if *hand == index {
+                    *hand = index % self.values.len();
+                } else if *hand == old_len - 1 {
+                    // `swap_remove` moved the last entry into the removed slot.
+                    // If the hand was pointing at that last entry, keep it
+                    // pointing at the same logical key.
+                    *hand = index;
+                } else if *hand >= self.values.len() {
+                    *hand = 0;
+                }
+            }
+        };
+
+        true
     }
 }
 
@@ -427,7 +451,50 @@ impl RedisDb {
     }
 
     pub(crate) fn evict_sieve(&mut self) -> bool {
-        todo!()
+        let len = self.values.len();
+        if len == 0 {
+            return false;
+        }
+
+        let mut hand = match self.eviction_state {
+            EvictionState::Sieve { hand } => hand % len,
+            EvictionState::None => return false,
+        };
+
+        for _ in 0..(len * 2) {
+            let victim = match self.values.get_index_mut(hand) {
+                Some((key, entry)) => match &mut entry.eviction {
+                    EvictionEntryMeta::Sieve { weight } if *weight == 0 => Some(key.clone()),
+                    EvictionEntryMeta::Sieve { weight } => {
+                        *weight = 0;
+                        hand = (hand + 1) % len;
+                        None
+                    }
+                    EvictionEntryMeta::None => {
+                        hand = (hand + 1) % len;
+                        None
+                    }
+                },
+                None => {
+                    hand = 0;
+                    None
+                }
+            };
+
+            if let Some(key) = victim {
+                if let EvictionState::Sieve { hand: state_hand } = &mut self.eviction_state {
+                    *state_hand = hand;
+                }
+
+                return self.delete(&key);
+            }
+        }
+
+        if let EvictionState::Sieve { hand: state_hand } = &mut self.eviction_state {
+            *state_hand = hand;
+        }
+
+        false
     }
 }
 
@@ -1007,6 +1074,41 @@ mod tests {
         }
         db.enforce_memory_limit().unwrap();
         assert!(db.memory_used() <= db.max_memory().unwrap());
+    }
+
+    #[test]
+    fn allkeys_sieve_gives_touched_key_second_chance() {
+        let config = RedisDbConfig {
+            max_memory: None,
+            eviction_policy: EvictionPolicy::AllKeysSieve,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        db.set(b"hot".to_vec(), b"v".to_vec()).unwrap();
+        db.set(b"cold".to_vec(), b"v".to_vec()).unwrap();
+        assert_eq!(db.get(b"hot"), Some(b"v".to_vec()));
+
+        assert!(db.evict_sieve());
+        assert!(db.exists(b"hot"));
+        assert!(!db.exists(b"cold"));
+    }
+
+    #[test]
+    fn allkeys_sieve_clears_weights_before_eviction() {
+        let config = RedisDbConfig {
+            max_memory: None,
+            eviction_policy: EvictionPolicy::AllKeysSieve,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        db.set(b"first".to_vec(), b"v".to_vec()).unwrap();
+        db.set(b"second".to_vec(), b"v".to_vec()).unwrap();
+        assert_eq!(db.get(b"first"), Some(b"v".to_vec()));
+        assert_eq!(db.get(b"second"), Some(b"v".to_vec()));
+
+        assert!(db.evict_sieve());
+        assert!(!db.exists(b"first"));
+        assert!(db.exists(b"second"));
     }
 
     #[test]
