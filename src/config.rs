@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -25,4 +25,24 @@ pub struct Config {
     /// Host to listen for incoming connections
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
+
+    /// Enable append-only file persistence
+    #[arg(long, default_value_t = true)]
+    pub aof_enabled: bool,
+
+    /// Path to the append-only file
+    #[arg(long, default_value = "appendonly.aof")]
+    pub aof_path: String,
+
+    /// When to flush AOF writes to disk
+    #[arg(long, value_enum, default_value_t = FsyncPolicy::Always)]
+    pub aof_fsync_policy: FsyncPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum FsyncPolicy {
+    Always,
+    #[value(name = "everysec")]
+    EverySec,
+    No,
 }

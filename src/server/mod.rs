@@ -1,3 +1,4 @@
+mod aof;
 mod commands;
 
 use std::io::{self, Read, Write};
@@ -12,6 +13,7 @@ use slab::Slab;
 use crate::config::Config;
 use crate::db::RedisDb;
 use crate::resp::{self, RespError};
+use aof::Aof;
 
 use commands::handle_request;
 
@@ -37,6 +39,12 @@ pub fn run(config: Config) -> std::io::Result<()> {
     let address: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .expect("invalid host/port");
+
+    let mut aof_writer = if config.aof_enabled {
+        Some(Aof::new(&config.aof_path, config.aof_fsync_policy)?)
+    } else {
+        None
+    };
 
     let mut listener = TcpListener::bind(address)?;
 
@@ -134,7 +142,12 @@ pub fn run(config: Config) -> std::io::Result<()> {
                                         String::from_utf8_lossy(&buf[..n]),
                                     );
 
-                                    if !process_client_buffer(client, token, &mut db) {
+                                    if !process_client_buffer(
+                                        client,
+                                        token,
+                                        &mut db,
+                                        &mut aof_writer,
+                                    ) {
                                         disconnected = true;
                                         break;
                                     }
@@ -179,8 +192,19 @@ pub fn run(config: Config) -> std::io::Result<()> {
 
 /// true = keep the client connected
 /// false = disconnect the client
-fn process_client_buffer(client: &mut Client, token: Token, db: &mut RedisDb) -> bool {
-    process_buffers(&mut client.read_buf, &mut client.write_buf, token, db)
+fn process_client_buffer(
+    client: &mut Client,
+    token: Token,
+    db: &mut RedisDb,
+    aof_writer: &mut Option<Aof>,
+) -> bool {
+    process_buffers(
+        &mut client.read_buf,
+        &mut client.write_buf,
+        token,
+        db,
+        aof_writer,
+    )
 }
 
 /// Parse as many complete RESP commands as possible from `read_buf` and append
@@ -193,6 +217,7 @@ fn process_buffers(
     write_buf: &mut Vec<u8>,
     token: Token,
     db: &mut RedisDb,
+    aof_writer: &mut Option<Aof>,
 ) -> bool {
     while !read_buf.is_empty() {
         match resp::decode_one(read_buf) {
@@ -202,8 +227,12 @@ fn process_buffers(
                 println!("Parsed from {token:?}: {value:?}");
 
                 let outcome = handle_request(value, db);
-                if let Some(_command) = &outcome.persist {
-                    // TODO: append to AOF before writing response.
+                if let Some(command) = &outcome.persist
+                    && let Some(aof_writer) = aof_writer.as_mut()
+                    && let Err(err) = aof_writer.append(command)
+                {
+                    eprintln!("AOF append error: {err}");
+                    return false;
                 }
 
                 write_buf.extend_from_slice(&outcome.response.encode());
@@ -256,7 +285,8 @@ mod tests {
     const TEST_CLIENT: Token = Token(1);
 
     fn process(read_buf: &mut Vec<u8>, write_buf: &mut Vec<u8>, db: &mut RedisDb) -> bool {
-        process_buffers(read_buf, write_buf, TEST_CLIENT, db)
+        let mut aof_writer = None;
+        process_buffers(read_buf, write_buf, TEST_CLIENT, db, &mut aof_writer)
     }
 
     #[test]
