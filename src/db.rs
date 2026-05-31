@@ -21,7 +21,7 @@ impl Default for RedisDbConfig {
     fn default() -> Self {
         Self {
             max_memory: None,
-            eviction_policy: EvictionPolicy::AllKeysRandom,
+            eviction_policy: EvictionPolicy::AllKeysSieve,
         }
     }
 }
