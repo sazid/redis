@@ -1112,6 +1112,51 @@ mod tests {
     }
 
     #[test]
+    fn set_enforces_allkeys_sieve_and_preserves_touched_key() {
+        let config = RedisDbConfig {
+            max_memory: Some(
+                value_entry_memory_cost(b"hot", b"v") + value_entry_memory_cost(b"overflow", b"v"),
+            ),
+            eviction_policy: EvictionPolicy::AllKeysSieve,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        db.set(b"hot".to_vec(), b"v".to_vec()).unwrap();
+        db.set(b"cold".to_vec(), b"v".to_vec()).unwrap();
+        assert_eq!(db.get(b"hot"), Some(b"v".to_vec()));
+
+        db.set(b"overflow".to_vec(), b"v".to_vec()).unwrap();
+
+        assert!(db.exists(b"hot"));
+        assert!(!db.exists(b"cold"));
+        assert!(db.exists(b"overflow"));
+        assert!(db.memory_used() <= db.max_memory().unwrap());
+    }
+
+    #[test]
+    fn set_enforces_allkeys_sieve_after_clearing_weights() {
+        let config = RedisDbConfig {
+            max_memory: Some(
+                value_entry_memory_cost(b"first", b"v") + value_entry_memory_cost(b"second", b"v"),
+            ),
+            eviction_policy: EvictionPolicy::AllKeysSieve,
+        };
+        let mut db = RedisDb::with_config(config);
+
+        db.set(b"first".to_vec(), b"v".to_vec()).unwrap();
+        db.set(b"second".to_vec(), b"v".to_vec()).unwrap();
+        assert_eq!(db.get(b"first"), Some(b"v".to_vec()));
+        assert_eq!(db.get(b"second"), Some(b"v".to_vec()));
+
+        db.set(b"third".to_vec(), b"v".to_vec()).unwrap();
+
+        assert!(db.exists(b"first"));
+        assert!(db.exists(b"second"));
+        assert!(!db.exists(b"third"));
+        assert!(db.memory_used() <= db.max_memory().unwrap());
+    }
+
+    #[test]
     fn noeviction_rejects_oversized_write() {
         let config = RedisDbConfig {
             max_memory: Some(100),
