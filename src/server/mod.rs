@@ -12,7 +12,7 @@ use slab::Slab;
 
 use crate::config::Config;
 use crate::db::RedisDb;
-use crate::resp::{self, RespError};
+use crate::resp::{self, RespError, RespValue};
 use aof::Aof;
 
 use commands::handle_request;
@@ -35,10 +35,44 @@ fn token_to_key(token: Token) -> Option<usize> {
     token.0.checked_sub(1)
 }
 
+fn replay_aof(path: impl AsRef<std::path::Path>, db: &mut RedisDb) -> io::Result<()> {
+    let mut bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    while !bytes.is_empty() {
+        let (value, remaining) = resp::decode_one(&bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}")))?;
+
+        let consumed = bytes.len() - remaining.len();
+
+        let outcome = handle_request(value, db);
+
+        if let RespValue::Error(err) = outcome.response {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("AOF command failed during replay: {err}"),
+            ));
+        }
+
+        bytes.drain(..consumed);
+    }
+
+    Ok(())
+}
+
 pub fn run(config: Config) -> std::io::Result<()> {
     let address: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .expect("invalid host/port");
+
+    let mut db = RedisDb::new();
+
+    if config.aof_enabled {
+        replay_aof(&config.aof_path, &mut db)?;
+    }
 
     let mut aof_writer = if config.aof_enabled {
         Some(Aof::new(&config.aof_path, config.aof_fsync_policy)?)
@@ -57,8 +91,6 @@ pub fn run(config: Config) -> std::io::Result<()> {
     println!("Listening on {address}");
 
     let mut clients: Slab<Client> = Slab::new();
-
-    let mut db = RedisDb::new();
 
     let mut last_active_expire = Instant::now();
 
@@ -284,9 +316,127 @@ mod tests {
 
     const TEST_CLIENT: Token = Token(1);
 
+    fn resp_bulk(s: &str) -> RespValue {
+        RespValue::BulkString(Some(s.as_bytes().to_vec()))
+    }
+
+    fn command(items: &[RespValue]) -> RespValue {
+        RespValue::Array(Some(items.to_vec()))
+    }
+
+    fn temp_aof_path(test_name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+
+        path.push(format!(
+            "perds-redis-{test_name}-{}-{nanos}.aof",
+            std::process::id()
+        ));
+        path
+    }
+
+    fn write_aof(path: &std::path::Path, commands: &[RespValue]) {
+        let mut bytes = Vec::new();
+
+        for command in commands {
+            bytes.extend_from_slice(&command.encode());
+        }
+
+        std::fs::write(path, bytes).expect("test should write AOF file");
+    }
+
     fn process(read_buf: &mut Vec<u8>, write_buf: &mut Vec<u8>, db: &mut RedisDb) -> bool {
         let mut aof_writer = None;
         process_buffers(read_buf, write_buf, TEST_CLIENT, db, &mut aof_writer)
+    }
+
+    #[test]
+    fn replay_aof_restores_set_key() {
+        let path = temp_aof_path("replay-set");
+        write_aof(
+            &path,
+            &[command(&[
+                resp_bulk("SET"),
+                resp_bulk("foo"),
+                resp_bulk("bar"),
+            ])],
+        );
+
+        let mut db = RedisDb::new();
+
+        let result = replay_aof(&path, &mut db);
+        std::fs::remove_file(&path).ok();
+
+        assert!(result.is_ok());
+        assert_eq!(db.get(b"foo"), Some(b"bar".to_vec()));
+    }
+
+    #[test]
+    fn replay_aof_replays_multiple_commands_in_order() {
+        let path = temp_aof_path("replay-multiple");
+        write_aof(
+            &path,
+            &[
+                command(&[resp_bulk("SET"), resp_bulk("foo"), resp_bulk("bar")]),
+                command(&[resp_bulk("SET"), resp_bulk("baz"), resp_bulk("qux")]),
+                command(&[resp_bulk("DEL"), resp_bulk("foo")]),
+            ],
+        );
+
+        let mut db = RedisDb::new();
+
+        let result = replay_aof(&path, &mut db);
+        std::fs::remove_file(&path).ok();
+
+        assert!(result.is_ok());
+        assert_eq!(db.get(b"foo"), None);
+        assert_eq!(db.get(b"baz"), Some(b"qux".to_vec()));
+    }
+
+    #[test]
+    fn replay_aof_rejects_invalid_resp() {
+        let path = temp_aof_path("replay-invalid-resp");
+        std::fs::write(&path, b"?invalid\r\n").expect("test should write AOF file");
+
+        let mut db = RedisDb::new();
+
+        let result = replay_aof(&path, &mut db);
+        std::fs::remove_file(&path).ok();
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(db.key_count(), 0);
+    }
+
+    #[test]
+    fn replay_aof_rejects_command_errors() {
+        let path = temp_aof_path("replay-command-error");
+        write_aof(&path, &[command(&[resp_bulk("UNKNOWN")])]);
+
+        let mut db = RedisDb::new();
+
+        let result = replay_aof(&path, &mut db);
+        std::fs::remove_file(&path).ok();
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(db.key_count(), 0);
+    }
+
+    #[test]
+    fn replay_aof_missing_file_is_ok() {
+        let path = temp_aof_path("replay-missing-file");
+        std::fs::remove_file(&path).ok();
+
+        let mut db = RedisDb::new();
+
+        let result = replay_aof(&path, &mut db);
+
+        assert!(result.is_ok());
+        assert_eq!(db.key_count(), 0);
     }
 
     #[test]
