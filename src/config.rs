@@ -1,5 +1,7 @@
 use clap::{Parser, ValueEnum};
 
+use crate::eviction::EvictionPolicy;
+
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -37,6 +39,14 @@ pub struct Config {
     /// When to flush AOF writes to disk
     #[arg(long, value_enum, default_value_t = FsyncPolicy::Always)]
     pub aof_fsync_policy: FsyncPolicy,
+
+    /// Maximum memory, in bytes, before writes are rejected or keys are evicted
+    #[arg(long = "maxmemory", value_name = "BYTES")]
+    pub max_memory: Option<usize>,
+
+    /// Eviction policy used when maxmemory is configured
+    #[arg(long = "maxmemory-policy", value_enum, default_value_t = EvictionPolicy::AllKeysSieve)]
+    pub max_memory_policy: EvictionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -45,4 +55,33 @@ pub enum FsyncPolicy {
     #[value(name = "everysec")]
     EverySec,
     No,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn default_maxmemory_is_disabled() {
+        let config = Config::try_parse_from(["redis"]).unwrap();
+
+        assert_eq!(config.max_memory, None);
+        assert_eq!(config.max_memory_policy, EvictionPolicy::AllKeysSieve);
+    }
+
+    #[test]
+    fn parses_maxmemory_and_eviction_policy() {
+        let config = Config::try_parse_from([
+            "redis",
+            "--maxmemory",
+            "1024",
+            "--maxmemory-policy",
+            "noeviction",
+        ])
+        .unwrap();
+
+        assert_eq!(config.max_memory, Some(1024));
+        assert_eq!(config.max_memory_policy, EvictionPolicy::NoEviction);
+    }
 }

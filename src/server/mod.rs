@@ -11,7 +11,7 @@ use mio::{Events, Interest, Poll, Token};
 use slab::Slab;
 
 use crate::config::Config;
-use crate::db::RedisDb;
+use crate::db::{RedisDb, RedisDbConfig};
 use crate::resp::{self, RespError};
 use aof::Aof;
 
@@ -75,7 +75,10 @@ pub fn run(config: Config) -> std::io::Result<()> {
         .parse()
         .expect("invalid host/port");
 
-    let mut db = RedisDb::new();
+    let mut db = RedisDb::with_config(RedisDbConfig {
+        max_memory: config.max_memory,
+        eviction_policy: config.max_memory_policy,
+    });
 
     if config.aof_enabled {
         replay_aof(&config.aof_path, &mut db)?;

@@ -101,22 +101,46 @@ Use `everysec` fsync behavior:
 cargo run -- --aof-enabled --aof-fsync-policy everysec
 ```
 
+Set a memory limit and reject writes over that limit:
+
+```sh
+cargo run -- --maxmemory 1048576 --maxmemory-policy noeviction
+```
+
+Set a memory limit and evict keys with SIEVE:
+
+```sh
+cargo run -- --maxmemory 1048576 --maxmemory-policy allkeys-sieve
+```
+
 Available CLI options:
 
 ```text
 Usage: redis [OPTIONS]
 
 Options:
-  -p, --port <PORT>                          Port to listen for incoming connections [default: 6379]
-      --host <HOST>                          Host to listen for incoming connections [default: 127.0.0.1]
-      --aof-enabled                          Enable append-only file persistence
-      --aof-path <AOF_PATH>                  Path to the append-only file [default: db.aof]
-      --aof-fsync-policy <AOF_FSYNC_POLICY>  When to flush AOF writes to disk [default: always] [possible values: always, everysec, no]
-  -h, --help                                 Print help
-  -V, --version                              Print version
+  -p, --port <PORT>
+          Port to listen for incoming connections [default: 6379]
+      --host <HOST>
+          Host to listen for incoming connections [default: 127.0.0.1]
+      --aof-enabled
+          Enable append-only file persistence
+      --aof-path <AOF_PATH>
+          Path to the append-only file [default: db.aof]
+      --aof-fsync-policy <AOF_FSYNC_POLICY>
+          When to flush AOF writes to disk [default: always] [possible values: always, everysec, no]
+      --maxmemory <BYTES>
+          Maximum memory, in bytes, before writes are rejected or keys are evicted
+      --maxmemory-policy <MAX_MEMORY_POLICY>
+          Eviction policy used when maxmemory is configured [default: allkeys-sieve] [possible values: noeviction, volatile-random, volatile-ttl, allkeys-random, allkeys-sieve]
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 AOF is disabled by default in the current CLI configuration. Pass `--aof-enabled` to enable append-only persistence.
+Memory limits are disabled by default. Pass `--maxmemory` to enable memory enforcement; `--maxmemory-policy` controls how the server behaves after the limit is reached.
 
 ## Command Support
 
@@ -224,7 +248,7 @@ The database tracks an estimated memory usage for values and expiry metadata. Wh
 
 `allkeys-sieve` is the default database policy. Reads mark keys as touched, and the eviction hand gives touched keys one second chance before selecting a victim.
 
-The current CLI does not yet expose `maxmemory` or eviction policy flags. Those paths are implemented and tested at the database layer and are natural next steps for runtime configuration.
+Memory enforcement is disabled by default. Pass `--maxmemory` to enable it and `--maxmemory-policy` to choose the policy used when the limit is reached.
 
 ## Testing
 
@@ -248,7 +272,7 @@ The suite currently covers:
 - Memory accounting.
 - Eviction policies and out-of-memory responses.
 
-At the time this README was written, the test suite contains 171 tests.
+At the time this README was written, the test suite contains 173 tests.
 
 ## Benchmarks
 
@@ -419,7 +443,6 @@ Notable limitations:
 
 Potential next steps:
 
-- Expose `maxmemory` and eviction policy through CLI flags.
 - Add integration tests that drive the server over TCP with `redis-cli` or a RESP client.
 - Add parser, command-dispatch, AOF fsync, and eviction microbenchmarks.
 - Implement additional commands such as `MGET`, `MSET`, `INCR`, `DECR`, and `FLUSHDB`.

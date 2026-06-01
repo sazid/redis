@@ -1,13 +1,20 @@
 use crate::db::RedisDb;
+use clap::ValueEnum;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum EvictionPolicy {
+    #[value(name = "noeviction")]
     NoEviction,
+    #[value(name = "volatile-random")]
     VolatileRandom,
+    #[value(name = "volatile-ttl")]
     VolatileTTL,
+    #[value(name = "allkeys-random")]
     AllKeysRandom,
     #[allow(dead_code)]
+    #[value(skip)]
     AllKeysLRU,
+    #[value(name = "allkeys-sieve")]
     AllKeysSieve,
 }
 

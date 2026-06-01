@@ -94,6 +94,7 @@ fn expire_entry_memory_cost(key: &[u8]) -> usize {
 }
 
 impl RedisDb {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::with_config(RedisDbConfig::default())
     }
