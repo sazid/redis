@@ -285,6 +285,85 @@ Average throughput excluding `INFO` was 243,397 requests/second for this server 
 
 `INFO` is not a fair throughput win because this server returns a small custom metadata payload while Redis returns a much larger response. The comparable commands are also close to the local `redis-benchmark`/localhost ceiling on this machine, so small differences around 240,000 requests/second should not be over-interpreted.
 
+### Benchmark Matrix
+
+The no-pipeline benchmark above is useful as a simple latency-oriented smoke test, but it is limited by localhost round trips and the benchmark client. To expose more server-side work, I also ran a small matrix using pipelining, threaded benchmark clients, and larger payloads.
+
+The matrix can be rerun locally with:
+
+```sh
+scripts/benchmark_matrix.sh
+```
+
+The script builds the release binary, starts this server on port `6380`, starts `redis-server` on port `6381`, runs the matrix, prints raw `redis-benchmark` CSV output plus summary tables, and stops both servers on exit.
+
+Useful overrides:
+
+```sh
+THIS_PORT=6380 REDIS_PORT=6381 REQUESTS=100000 CLIENTS=50 PIPELINE=16 THREADS=4 PAYLOAD_SIZE=1024 scripts/benchmark_matrix.sh
+```
+
+Matrix setup:
+
+- Date: June 1, 2026.
+- Requests: 1,000,000 per command.
+- Clients: 50.
+- Pipelining: 16 requests.
+- Threaded mode: `redis-benchmark --threads 4`.
+- 1KB payload mode: `ECHO`, `SET`, and `GET` with 1,024-byte values.
+
+Summary:
+
+| Mode | This server avg req/s | redis-server avg req/s | This / Redis |
+| --- | ---: | ---: | ---: |
+| Pipeline 16 | 2,996,018 | 2,451,847 | 1.22x |
+| Pipeline 16, 4 benchmark threads | 1,997,339 | 1,850,078 | 1.08x |
+| Pipeline 16, 4 benchmark threads, 1KB payload | 1,553,633 | 1,775,855 | 0.87x |
+
+Pipeline 16 results:
+
+| Command | This server req/s | redis-server req/s | This / Redis |
+| --- | ---: | ---: | ---: |
+| `PING` | 2,985,075 | 3,184,713 | 0.94x |
+| `ECHO` | 3,095,975 | 2,941,177 | 1.05x |
+| `SET` | 2,732,241 | 1,980,198 | 1.38x |
+| `SET EX` | 2,392,345 | 1,342,282 | 1.78x |
+| `GET` | 3,194,888 | 2,583,979 | 1.24x |
+| `DEL` | 3,322,259 | 2,941,177 | 1.13x |
+| `EXISTS` | 3,278,689 | 2,652,520 | 1.24x |
+| `EXPIRE` | 2,747,253 | 1,766,785 | 1.55x |
+| `TTL` | 3,215,434 | 2,673,797 | 1.20x |
+
+Pipeline 16 with 4 benchmark threads:
+
+| Command | This server req/s | redis-server req/s | This / Redis |
+| --- | ---: | ---: | ---: |
+| `PING` | 2,000,000 | 2,000,000 | 1.00x |
+| `ECHO` | 1,996,008 | 2,000,000 | 1.00x |
+| `SET` | 2,000,000 | 2,000,000 | 1.00x |
+| `SET EX` | 1,996,008 | 1,333,333 | 1.50x |
+| `GET` | 1,996,008 | 1,996,008 | 1.00x |
+| `DEL` | 1,996,008 | 1,996,008 | 1.00x |
+| `EXISTS` | 1,996,008 | 1,996,008 | 1.00x |
+| `EXPIRE` | 1,996,008 | 1,333,333 | 1.50x |
+| `TTL` | 2,000,000 | 1,996,008 | 1.00x |
+
+Pipeline 16 with 4 benchmark threads and 1KB payloads:
+
+| Command | This server req/s | redis-server req/s | This / Redis |
+| --- | ---: | ---: | ---: |
+| `ECHO` | 1,331,558 | 1,996,008 | 0.67x |
+| `SET` | 1,333,333 | 1,331,558 | 1.00x |
+| `GET` | 1,996,008 | 2,000,000 | 1.00x |
+
+Observations:
+
+- Pipelining is the most useful change to the benchmark. It moves the test from roughly 240,000 requests/second to multi-million request throughput by amortizing round trips and syscalls.
+- Adding `--threads 4` did not help on this machine. The threaded benchmark run flattened around 2,000,000 requests/second and was lower than the single benchmark-thread pipelined run for this server, likely because the server itself is single-threaded and extra benchmark threads add scheduling overhead.
+- Increasing payload size makes copy and buffer behavior more visible. The 1KB `SET` and `GET` results are close to Redis, while 1KB `ECHO` is behind Redis; that points toward request parsing or response payload handling rather than storage.
+- Pipelined benchmarks are throughput tests, not single-request round-trip latency tests. Both views are useful, but they answer different questions.
+- These command benchmarks repeatedly operate on a small number of keys. They are useful for hot-path throughput comparisons, but they do not replace high-cardinality workload tests.
+
 ### Interesting Notes
 
 An earlier run of this same benchmark measured the server with several `println!` calls still present on the connection and request paths. Those calls printed accepted/disconnected clients, raw socket reads, and parsed RESP values. Even when stdout was redirected away from the terminal, Rust still had to format those values, lock stdout, and perform the writes.
@@ -334,7 +413,7 @@ Notable limitations:
 - No authentication or ACL system.
 - No TLS.
 - No RDB snapshots.
-- No benchmark suite yet.
+- Benchmarks are local scripts, not a CI performance suite.
 
 ## Roadmap
 
@@ -342,7 +421,7 @@ Potential next steps:
 
 - Expose `maxmemory` and eviction policy through CLI flags.
 - Add integration tests that drive the server over TCP with `redis-cli` or a RESP client.
-- Add benchmarks for parser throughput, command latency, AOF fsync modes, and eviction behavior.
+- Add parser, command-dispatch, AOF fsync, and eviction microbenchmarks.
 - Implement additional commands such as `MGET`, `MSET`, `INCR`, `DECR`, and `FLUSHDB`.
 - Add a clean shutdown path.
 - Add GitHub Actions for formatting, clippy, and tests.
