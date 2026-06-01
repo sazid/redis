@@ -301,7 +301,7 @@ impl RespValue {
         out
     }
 
-    fn encode_into(&self, out: &mut Vec<u8>) {
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
         match self {
             RespValue::SimpleString(value) => {
                 out.extend_from_slice(b"+");
@@ -371,4 +371,13 @@ fn encodes_bulk_string() {
         RespValue::BulkString(Some(b"hello".to_vec())).encode(),
         b"$5\r\nhello\r\n"
     );
+}
+
+#[test]
+fn encode_into_appends_to_existing_buffer() {
+    let mut out = b"prefix".to_vec();
+
+    RespValue::SimpleString("OK".to_owned()).encode_into(&mut out);
+
+    assert_eq!(out, b"prefix+OK\r\n");
 }

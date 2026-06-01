@@ -1,4 +1,4 @@
-use indexmap::IndexMap;
+use indexmap::{IndexMap, map::Entry};
 use std::time::{Duration, Instant};
 
 use crate::eviction::{EvictionError, EvictionPolicy, enforce_memory_limit};
@@ -61,15 +61,23 @@ pub enum RedisDbError {
     NoEvictableKeys,
 }
 
-fn eviction_state_for(policy: EvictionPolicy) -> EvictionState {
-    match policy {
+fn eviction_state_for(config: RedisDbConfig) -> EvictionState {
+    if config.max_memory.is_none() {
+        return EvictionState::None;
+    }
+
+    match config.eviction_policy {
         EvictionPolicy::AllKeysSieve => EvictionState::Sieve { hand: 0 },
         _ => EvictionState::None,
     }
 }
 
-fn entry_meta_for(policy: EvictionPolicy) -> EvictionEntryMeta {
-    match policy {
+fn entry_meta_for(config: RedisDbConfig) -> EvictionEntryMeta {
+    if config.max_memory.is_none() {
+        return EvictionEntryMeta::None;
+    }
+
+    match config.eviction_policy {
         EvictionPolicy::AllKeysSieve => EvictionEntryMeta::Sieve { weight: 0 },
         _ => EvictionEntryMeta::None,
     }
@@ -91,7 +99,7 @@ impl RedisDb {
     }
 
     pub fn with_config(config: RedisDbConfig) -> Self {
-        let eviction_state = eviction_state_for(config.eviction_policy);
+        let eviction_state = eviction_state_for(config);
 
         Self {
             values: IndexMap::new(),
@@ -126,24 +134,36 @@ impl RedisDb {
     }
 
     fn set_unchecked(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        let entry_cost = value_entry_memory_cost(&key, &value);
-
-        // If overwriting, free old value memory first.
-        if let Some(old_value) = self.values.get(&key) {
-            self.value_memory_used -= value_entry_memory_cost(&key, &old_value.value);
-        }
-
-        self.value_memory_used += entry_cost;
-
         let entry = ValueEntry {
             value,
-            eviction: entry_meta_for(self.config.eviction_policy),
+            eviction: entry_meta_for(self.config),
         };
-        self.values.insert(key.clone(), entry);
 
-        // Redis SET clears existing TTL unless KEEPTTL is used.
-        if self.expires.swap_remove(&key).is_some() {
-            self.expires_memory_used -= expire_entry_memory_cost(&key);
+        match self.values.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                let key = occupied.key();
+                self.value_memory_used -= value_entry_memory_cost(key, &occupied.get().value);
+                self.value_memory_used += value_entry_memory_cost(key, &entry.value);
+
+                // Redis SET clears existing TTL unless KEEPTTL is used.
+                if self.expires.swap_remove(key).is_some() {
+                    self.expires_memory_used -= expire_entry_memory_cost(key);
+                }
+
+                occupied.insert(entry);
+            }
+
+            Entry::Vacant(vacant) => {
+                let key = vacant.key();
+                self.value_memory_used += value_entry_memory_cost(key, &entry.value);
+
+                // Keep expiry metadata consistent even if an orphaned expiry exists.
+                if self.expires.swap_remove(key).is_some() {
+                    self.expires_memory_used -= expire_entry_memory_cost(key);
+                }
+
+                vacant.insert(entry);
+            }
         }
     }
 
@@ -182,14 +202,25 @@ impl RedisDb {
         })
     }
 
+    #[cfg(test)]
     pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.get_ref(key).map(<[u8]>::to_vec)
+    }
+
+    pub fn get_ref(&mut self, key: &[u8]) -> Option<&[u8]> {
         if self.is_expired(key) {
             self.delete(key);
             return None;
         }
 
-        self.touch_key(key);
-        self.values.get(key).map(|entry| entry.value.clone())
+        let track_access = self.tracks_access_for_eviction();
+        self.values.get_mut(key).map(|entry| {
+            if track_access {
+                touch_entry(entry);
+            }
+
+            entry.value.as_slice()
+        })
     }
 
     pub fn exists(&mut self, key: &[u8]) -> bool {
@@ -198,23 +229,27 @@ impl RedisDb {
             return false;
         }
 
-        self.touch_key(key);
-        self.values.contains_key(key)
+        let track_access = self.tracks_access_for_eviction();
+        let Some(entry) = self.values.get_mut(key) else {
+            return false;
+        };
+
+        if track_access {
+            touch_entry(entry);
+        }
+
+        true
     }
 
     pub fn delete(&mut self, key: &[u8]) -> bool {
-        let Some(index) = self.values.get_index_of(key) else {
+        let Some((index, removed_key, entry)) = self.values.swap_remove_full(key) else {
             return false;
         };
 
-        let Some(entry) = self.values.swap_remove(key) else {
-            return false;
-        };
+        self.value_memory_used -= value_entry_memory_cost(&removed_key, &entry.value);
 
-        self.value_memory_used -= value_entry_memory_cost(key, &entry.value);
-
-        if self.expires.swap_remove(key).is_some() {
-            self.expires_memory_used -= expire_entry_memory_cost(key);
+        if self.expires.swap_remove(&removed_key).is_some() {
+            self.expires_memory_used -= expire_entry_memory_cost(&removed_key);
         }
 
         match &mut self.eviction_state {
@@ -409,17 +444,8 @@ impl RedisDb {
 
 // Cache related methods.
 impl RedisDb {
-    fn touch_key(&mut self, key: &[u8]) {
-        let Some(entry) = self.values.get_mut(key) else {
-            return;
-        };
-
-        match &mut entry.eviction {
-            EvictionEntryMeta::Sieve { weight } => {
-                *weight = 1;
-            }
-            EvictionEntryMeta::None => {}
-        }
+    fn tracks_access_for_eviction(&self) -> bool {
+        matches!(&self.eviction_state, EvictionState::Sieve { .. })
     }
 
     pub(crate) fn eviction_policy(&self) -> EvictionPolicy {
@@ -495,6 +521,15 @@ impl RedisDb {
         }
 
         false
+    }
+}
+
+fn touch_entry(entry: &mut ValueEntry) {
+    match &mut entry.eviction {
+        EvictionEntryMeta::Sieve { weight } => {
+            *weight = 1;
+        }
+        EvictionEntryMeta::None => {}
     }
 }
 
@@ -1063,6 +1098,19 @@ mod tests {
     }
 
     #[test]
+    fn no_max_memory_does_not_track_sieve_state() {
+        let mut db = RedisDb::new();
+
+        db.set(b"hot".to_vec(), b"v".to_vec()).unwrap();
+        db.set(b"cold".to_vec(), b"v".to_vec()).unwrap();
+        assert_eq!(db.get(b"hot"), Some(b"v".to_vec()));
+
+        assert!(!db.evict_sieve());
+        assert!(db.exists(b"hot"));
+        assert!(db.exists(b"cold"));
+    }
+
+    #[test]
     fn allkeys_random_evicts_until_under_limit() {
         let config = RedisDbConfig {
             max_memory: Some(value_entry_memory_cost(b"k", b"v") * 2),
@@ -1079,7 +1127,7 @@ mod tests {
     #[test]
     fn allkeys_sieve_gives_touched_key_second_chance() {
         let config = RedisDbConfig {
-            max_memory: None,
+            max_memory: Some(usize::MAX),
             eviction_policy: EvictionPolicy::AllKeysSieve,
         };
         let mut db = RedisDb::with_config(config);
@@ -1096,7 +1144,7 @@ mod tests {
     #[test]
     fn allkeys_sieve_clears_weights_before_eviction() {
         let config = RedisDbConfig {
-            max_memory: None,
+            max_memory: Some(usize::MAX),
             eviction_policy: EvictionPolicy::AllKeysSieve,
         };
         let mut db = RedisDb::with_config(config);

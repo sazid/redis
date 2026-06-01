@@ -248,7 +248,7 @@ The suite currently covers:
 - Memory accounting.
 - Eviction policies and out-of-memory responses.
 
-At the time this README was written, the test suite contains 168 tests.
+At the time this README was written, the test suite contains 171 tests.
 
 ## Benchmarks
 
@@ -270,18 +270,18 @@ Results:
 
 | Command | This server req/s | redis-server req/s | This / Redis | This p50 ms | Redis p50 ms |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `PING` | 229,885 | 236,967 | 0.97x | 0.111 | 0.111 |
-| `ECHO` | 243,902 | 239,234 | 1.02x | 0.111 | 0.111 |
-| `SET` | 242,131 | 239,808 | 1.01x | 0.111 | 0.111 |
-| `SET EX` | 242,718 | 243,309 | 1.00x | 0.111 | 0.111 |
+| `PING` | 230,947 | 238,095 | 0.97x | 0.111 | 0.111 |
+| `ECHO` | 245,700 | 238,663 | 1.03x | 0.111 | 0.111 |
+| `SET` | 244,499 | 241,546 | 1.01x | 0.111 | 0.111 |
+| `SET EX` | 244,499 | 243,309 | 1.00x | 0.111 | 0.111 |
 | `GET` | 244,499 | 239,234 | 1.02x | 0.111 | 0.111 |
-| `DEL` | 246,305 | 240,385 | 1.02x | 0.111 | 0.111 |
-| `EXISTS` | 243,309 | 239,234 | 1.02x | 0.111 | 0.111 |
-| `EXPIRE` | 242,718 | 240,964 | 1.01x | 0.111 | 0.111 |
-| `TTL` | 244,499 | 240,964 | 1.01x | 0.111 | 0.111 |
-| `INFO` | 241,546 | 68,120 | 3.55x | 0.111 | 0.687 |
+| `DEL` | 246,305 | 239,808 | 1.03x | 0.111 | 0.111 |
+| `EXISTS` | 246,305 | 240,964 | 1.02x | 0.111 | 0.111 |
+| `EXPIRE` | 245,098 | 242,718 | 1.01x | 0.111 | 0.111 |
+| `TTL` | 242,718 | 240,385 | 1.01x | 0.111 | 0.111 |
+| `INFO` | 240,385 | 68,353 | 3.52x | 0.111 | 0.679 |
 
-Average throughput excluding `INFO` was 242,219 requests/second for this server and 240,011 requests/second for Redis, or about 101% of Redis throughput across the comparable command set.
+Average throughput excluding `INFO` was 243,397 requests/second for this server and 240,525 requests/second for Redis, or about 101% of Redis throughput across the comparable command set.
 
 `INFO` is not a fair throughput win because this server returns a small custom metadata payload while Redis returns a much larger response. The comparable commands are also close to the local `redis-benchmark`/localhost ceiling on this machine, so small differences around 240,000 requests/second should not be over-interpreted.
 
@@ -289,21 +289,21 @@ Average throughput excluding `INFO` was 242,219 requests/second for this server 
 
 An earlier run of this same benchmark measured the server with several `println!` calls still present on the connection and request paths. Those calls printed accepted/disconnected clients, raw socket reads, and parsed RESP values. Even when stdout was redirected away from the terminal, Rust still had to format those values, lock stdout, and perform the writes.
 
-Removing those hot-path prints changed the result much more than any data-structure optimization in this workload:
+Removing those hot-path prints caused the largest improvement in this workload. Later small cleanups around AOF persistence, response encoding, and database lookups kept the result in the same localhost-limited range:
 
 | Command | Previous req/s | Latest req/s | Change |
 | --- | ---: | ---: | ---: |
-| `PING` | 196,464 | 229,885 | +17% |
-| `ECHO` | 185,529 | 243,902 | +31% |
-| `SET` | 134,409 | 242,131 | +80% |
-| `SET EX` | 122,399 | 242,718 | +98% |
+| `PING` | 196,464 | 230,947 | +18% |
+| `ECHO` | 185,529 | 245,700 | +32% |
+| `SET` | 134,409 | 244,499 | +82% |
+| `SET EX` | 122,399 | 244,499 | +100% |
 | `GET` | 176,056 | 244,499 | +39% |
 | `DEL` | 172,414 | 246,305 | +43% |
-| `EXISTS` | 173,310 | 243,309 | +40% |
-| `EXPIRE` | 162,602 | 242,718 | +49% |
-| `TTL` | 176,367 | 244,499 | +39% |
+| `EXISTS` | 173,310 | 246,305 | +42% |
+| `EXPIRE` | 162,602 | 245,098 | +51% |
+| `TTL` | 176,367 | 242,718 | +38% |
 
-Across the comparable commands, average throughput improved from 166,617 to 242,219 requests/second, a 45% increase. The main lesson is that logging in a hot path is still work, even if the output is discarded later.
+Across the comparable commands, average throughput improved from 166,617 to 243,397 requests/second, a 46% increase. The main lesson is that logging in a hot path is still work, even if the output is discarded later.
 
 ## What This Demonstrates
 

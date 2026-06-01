@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{config::FsyncPolicy, resp::RespValue};
+use crate::config::FsyncPolicy;
 
 pub(crate) struct Aof {
     file: std::fs::File,
@@ -25,8 +25,8 @@ impl Aof {
         })
     }
 
-    pub(crate) fn append(&mut self, command: &RespValue) -> io::Result<()> {
-        self.file.write_all(&command.encode())?;
+    pub(crate) fn append(&mut self, command: &[u8]) -> io::Result<()> {
+        self.file.write_all(command)?;
         match self.fsync_policy {
             FsyncPolicy::Always => {
                 self.file.sync_data()?;

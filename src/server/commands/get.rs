@@ -1,17 +1,29 @@
-use super::value_as_bytes;
+use super::{CommandResponse, value_as_bytes};
 use crate::{db::RedisDb, resp::RespValue};
 
+#[cfg(test)]
 pub(super) fn handle_get(items: &[RespValue], db: &mut RedisDb) -> RespValue {
+    handle_get_response(items, db).into_owned()
+}
+
+pub(super) fn handle_get_response<'a>(
+    items: &[RespValue],
+    db: &'a mut RedisDb,
+) -> CommandResponse<'a> {
     match items {
         [_command, key] => {
             let Some(key) = value_as_bytes(key) else {
-                return RespValue::Error("ERR invalid GET argument: key".to_owned());
+                return CommandResponse::Resp(RespValue::Error(
+                    "ERR invalid GET argument: key".to_owned(),
+                ));
             };
 
-            RespValue::BulkString(db.get(key))
+            CommandResponse::BulkString(db.get_ref(key))
         }
 
-        _ => RespValue::Error("ERR wrong number of arguments for 'get' command".to_owned()),
+        _ => CommandResponse::Resp(RespValue::Error(
+            "ERR wrong number of arguments for 'get' command".to_owned(),
+        )),
     }
 }
 

@@ -10,39 +10,87 @@ mod ttl;
 
 use self::{
     del::handle_del, echo::handle_echo, exists::handle_exists, expire::handle_expire,
-    get::handle_get, info::handle_info, ping::handle_ping, set::handle_set, ttl::handle_ttl,
+    get::handle_get_response, info::handle_info, ping::handle_ping, set::handle_set,
+    ttl::handle_ttl,
 };
 use crate::{db::RedisDb, resp::RespValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CommandOutcome {
-    pub(super) response: RespValue,
-    pub(super) persist: Option<RespValue>,
+pub(super) struct CommandOutcome<'a> {
+    pub(super) response: CommandResponse<'a>,
+    pub(super) persist: bool,
 }
 
-#[inline(always)]
-fn without_persist(response: RespValue) -> CommandOutcome {
-    CommandOutcome {
-        response,
-        persist: None,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum CommandResponse<'a> {
+    Resp(RespValue),
+    BulkString(Option<&'a [u8]>),
 }
 
-#[inline(always)]
-fn persist_if(response: RespValue, command: RespValue, should_persist: bool) -> CommandOutcome {
-    if should_persist {
-        CommandOutcome {
-            response,
-            persist: Some(command),
+impl CommandResponse<'_> {
+    pub(super) fn encode_into(&self, out: &mut Vec<u8>) {
+        match self {
+            CommandResponse::Resp(value) => value.encode_into(out),
+            CommandResponse::BulkString(Some(bytes)) => {
+                out.extend_from_slice(b"$");
+                out.extend_from_slice(bytes.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                out.extend_from_slice(bytes);
+                out.extend_from_slice(b"\r\n");
+            }
+            CommandResponse::BulkString(None) => {
+                out.extend_from_slice(b"$-1\r\n");
+            }
         }
-    } else {
-        without_persist(response)
+    }
+
+    #[cfg(test)]
+    fn into_owned(self) -> RespValue {
+        match self {
+            CommandResponse::Resp(value) => value,
+            CommandResponse::BulkString(Some(bytes)) => RespValue::BulkString(Some(bytes.to_vec())),
+            CommandResponse::BulkString(None) => RespValue::BulkString(None),
+        }
+    }
+
+    pub(super) fn error_message(&self) -> Option<&str> {
+        match self {
+            CommandResponse::Resp(RespValue::Error(err)) => Some(err),
+            _ => None,
+        }
     }
 }
 
-pub(super) fn handle_request(value: RespValue, db: &mut RedisDb) -> CommandOutcome {
-    let original_command = value.clone();
+impl PartialEq<RespValue> for CommandResponse<'_> {
+    fn eq(&self, other: &RespValue) -> bool {
+        match (self, other) {
+            (CommandResponse::Resp(value), other) => value == other,
+            (CommandResponse::BulkString(Some(bytes)), RespValue::BulkString(Some(other))) => {
+                *bytes == other.as_slice()
+            }
+            (CommandResponse::BulkString(None), RespValue::BulkString(None)) => true,
+            _ => false,
+        }
+    }
+}
 
+#[inline(always)]
+fn without_persist<'a>(response: RespValue) -> CommandOutcome<'a> {
+    CommandOutcome {
+        response: CommandResponse::Resp(response),
+        persist: false,
+    }
+}
+
+#[inline(always)]
+fn persist_if<'a>(response: RespValue, should_persist: bool) -> CommandOutcome<'a> {
+    CommandOutcome {
+        response: CommandResponse::Resp(response),
+        persist: should_persist,
+    }
+}
+
+pub(super) fn handle_request<'a>(value: RespValue, db: &'a mut RedisDb) -> CommandOutcome<'a> {
     let RespValue::Array(Some(items)) = value else {
         return without_persist(RespValue::Error("ERR expected array command".to_owned()));
     };
@@ -64,13 +112,16 @@ pub(super) fn handle_request(value: RespValue, db: &mut RedisDb) -> CommandOutco
     } else if command_name.eq_ignore_ascii_case(b"SET") {
         let response = handle_set(&items, db);
         let should_persist = matches!(&response, RespValue::SimpleString(value) if value == "OK");
-        persist_if(response, original_command, should_persist)
+        persist_if(response, should_persist)
     } else if command_name.eq_ignore_ascii_case(b"GET") {
-        without_persist(handle_get(&items, db))
+        CommandOutcome {
+            response: handle_get_response(&items, db),
+            persist: false,
+        }
     } else if command_name.eq_ignore_ascii_case(b"EXPIRE") {
         let response = handle_expire(&items, db);
         let should_persist = matches!(&response, RespValue::Integer(value) if *value == 1);
-        persist_if(response, original_command, should_persist)
+        persist_if(response, should_persist)
     } else if command_name.eq_ignore_ascii_case(b"EXISTS") {
         without_persist(handle_exists(&items, db))
     } else if command_name.eq_ignore_ascii_case(b"TTL") {
@@ -78,7 +129,7 @@ pub(super) fn handle_request(value: RespValue, db: &mut RedisDb) -> CommandOutco
     } else if command_name.eq_ignore_ascii_case(b"DEL") {
         let response = handle_del(&items, db);
         let should_persist = matches!(&response, RespValue::Integer(value) if *value > 0);
-        persist_if(response, original_command, should_persist)
+        persist_if(response, should_persist)
     } else if command_name.eq_ignore_ascii_case(b"INFO") {
         without_persist(handle_info(&items, db))
     } else {
@@ -127,7 +178,7 @@ mod tests {
     }
 
     fn handle_response(value: RespValue, db: &mut RedisDb) -> RespValue {
-        handle_request(value, db).response
+        handle_request(value, db).response.into_owned()
     }
 
     // --- PING ---
@@ -212,14 +263,14 @@ mod tests {
     }
 
     #[test]
-    fn successful_set_persists_original_command() {
+    fn successful_set_requests_persistence() {
         let mut db = RedisDb::new();
         let request = command(&[resp_bulk("set"), resp_bulk("k"), resp_bulk("v")]);
 
-        let outcome = handle_request(request.clone(), &mut db);
+        let outcome = handle_request(request, &mut db);
 
         assert_eq!(outcome.response, RespValue::SimpleString("OK".to_owned()));
-        assert_eq!(outcome.persist, Some(request));
+        assert!(outcome.persist);
     }
 
     // --- GET ---
@@ -248,7 +299,7 @@ mod tests {
         let outcome = handle_request(request, &mut db);
 
         assert_eq!(outcome.response, RespValue::BulkString(Some(b"v".to_vec())));
-        assert_eq!(outcome.persist, None);
+        assert!(!outcome.persist);
     }
 
     // --- EXPIRE ---
@@ -287,15 +338,15 @@ mod tests {
     }
 
     #[test]
-    fn successful_expire_persists_original_command() {
+    fn successful_expire_requests_persistence() {
         let mut db = RedisDb::new();
         db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         let request = command(&[resp_bulk("EXPIRE"), resp_bulk("k"), resp_int(10)]);
 
-        let outcome = handle_request(request.clone(), &mut db);
+        let outcome = handle_request(request, &mut db);
 
         assert_eq!(outcome.response, RespValue::Integer(1));
-        assert_eq!(outcome.persist, Some(request));
+        assert!(outcome.persist);
     }
 
     #[test]
@@ -306,7 +357,7 @@ mod tests {
         let outcome = handle_request(request, &mut db);
 
         assert_eq!(outcome.response, RespValue::Integer(0));
-        assert_eq!(outcome.persist, None);
+        assert!(!outcome.persist);
     }
 
     // --- EXISTS ---
@@ -421,15 +472,15 @@ mod tests {
     }
 
     #[test]
-    fn successful_del_persists_original_command() {
+    fn successful_del_requests_persistence() {
         let mut db = RedisDb::new();
         db.set(b"k".to_vec(), b"v".to_vec()).unwrap();
         let request = command(&[resp_bulk("del"), resp_bulk("k")]);
 
-        let outcome = handle_request(request.clone(), &mut db);
+        let outcome = handle_request(request, &mut db);
 
         assert_eq!(outcome.response, RespValue::Integer(1));
-        assert_eq!(outcome.persist, Some(request));
+        assert!(outcome.persist);
     }
 
     #[test]
@@ -440,7 +491,7 @@ mod tests {
         let outcome = handle_request(request, &mut db);
 
         assert_eq!(outcome.response, RespValue::Integer(0));
-        assert_eq!(outcome.persist, None);
+        assert!(!outcome.persist);
     }
 
     // --- MULTI-COMMAND SEQUENCES ---

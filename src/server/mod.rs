@@ -12,7 +12,7 @@ use slab::Slab;
 
 use crate::config::Config;
 use crate::db::RedisDb;
-use crate::resp::{self, RespError, RespValue};
+use crate::resp::{self, RespError};
 use aof::Aof;
 
 use commands::handle_request;
@@ -53,7 +53,7 @@ fn replay_aof(path: impl AsRef<std::path::Path>, db: &mut RedisDb) -> io::Result
 
         let outcome = handle_request(value, db);
 
-        if let RespValue::Error(err) = outcome.response {
+        if let Some(err) = outcome.response.error_message() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("AOF command failed during replay: {err}"),
@@ -126,7 +126,7 @@ pub fn run(config: Config) -> std::io::Result<()> {
                     // accept clients here
                     loop {
                         match listener.accept() {
-                            Ok((mut stream, _addr)) => {
+                            Ok((mut stream, _)) => {
                                 let entry = clients.vacant_entry();
                                 let token = key_to_token(entry.key());
 
@@ -256,15 +256,15 @@ fn process_buffers(
                 let consumed = read_buf.len() - remaining.len();
 
                 let outcome = handle_request(value, db);
-                if let Some(command) = &outcome.persist
+                if outcome.persist
                     && let Some(aof_writer) = aof_writer.as_mut()
-                    && let Err(err) = aof_writer.append(command)
+                    && let Err(err) = aof_writer.append(&read_buf[..consumed])
                 {
                     eprintln!("AOF append error: {err}");
                     return false;
                 }
 
-                write_buf.extend_from_slice(&outcome.response.encode());
+                outcome.response.encode_into(write_buf);
 
                 read_buf.drain(..consumed);
             }
@@ -310,6 +310,7 @@ fn flush_client_write_buffer(client: &mut Client, token: Token) -> io::Result<bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resp::RespValue;
 
     const TEST_CLIENT: Token = Token(1);
 
@@ -434,6 +435,39 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(db.key_count(), 0);
+    }
+
+    #[test]
+    fn process_buffers_appends_only_successful_mutations_to_aof() {
+        let path = temp_aof_path("append-successful-mutations");
+        std::fs::remove_file(&path).ok();
+
+        let set = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
+        let get = b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+        let del_missing = b"*2\r\n$3\r\nDEL\r\n$7\r\nmissing\r\n";
+
+        let mut db = RedisDb::new();
+        let mut read_buf = [set.as_slice(), get.as_slice(), del_missing.as_slice()].concat();
+        let mut write_buf = Vec::new();
+        let mut aof_writer = Some(
+            Aof::new(&path, crate::config::FsyncPolicy::No).expect("test should create AOF writer"),
+        );
+
+        assert!(process_buffers(
+            &mut read_buf,
+            &mut write_buf,
+            TEST_CLIENT,
+            &mut db,
+            &mut aof_writer,
+        ));
+
+        drop(aof_writer);
+
+        assert!(read_buf.is_empty());
+        assert_eq!(write_buf, b"+OK\r\n$3\r\nbar\r\n:0\r\n");
+        assert_eq!(std::fs::read(&path).unwrap(), set);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
