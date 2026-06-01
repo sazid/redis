@@ -27,7 +27,7 @@ pub struct Config {
     pub host: String,
 
     /// Enable append-only file persistence
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub aof_enabled: bool,
 
     /// Path to the append-only file
