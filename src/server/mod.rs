@@ -126,7 +126,7 @@ pub fn run(config: Config) -> std::io::Result<()> {
                     // accept clients here
                     loop {
                         match listener.accept() {
-                            Ok((mut stream, addr)) => {
+                            Ok((mut stream, _addr)) => {
                                 let entry = clients.vacant_entry();
                                 let token = key_to_token(entry.key());
 
@@ -138,8 +138,6 @@ pub fn run(config: Config) -> std::io::Result<()> {
                                     read_buf: Vec::new(),
                                     write_buf: Vec::new(),
                                 });
-
-                                println!("Accepted client {addr} as {token:?}");
                             }
 
                             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -175,11 +173,6 @@ pub fn run(config: Config) -> std::io::Result<()> {
 
                                 Ok(n) => {
                                     client.read_buf.extend_from_slice(&buf[..n]);
-
-                                    println!(
-                                        "Received from {token:?}: {:?}",
-                                        String::from_utf8_lossy(&buf[..n]),
-                                    );
 
                                     if !process_client_buffer(
                                         client,
@@ -221,7 +214,6 @@ pub fn run(config: Config) -> std::io::Result<()> {
 
                     if disconnected && let Some(mut client) = clients.try_remove(key) {
                         poll.registry().deregister(&mut client.socket)?;
-                        println!("Disconnected {token:?}");
                     }
                 }
             }
@@ -262,8 +254,6 @@ fn process_buffers(
         match resp::decode_one(read_buf) {
             Ok((value, remaining)) => {
                 let consumed = read_buf.len() - remaining.len();
-
-                println!("Parsed from {token:?}: {value:?}");
 
                 let outcome = handle_request(value, db);
                 if let Some(command) = &outcome.persist

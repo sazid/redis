@@ -270,20 +270,40 @@ Results:
 
 | Command | This server req/s | redis-server req/s | This / Redis | This p50 ms | Redis p50 ms |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `PING` | 196,464 | 239,808 | 0.82x | 0.255 | 0.111 |
-| `ECHO` | 185,529 | 238,095 | 0.78x | 0.271 | 0.111 |
-| `SET` | 134,409 | 238,663 | 0.56x | 0.367 | 0.111 |
-| `SET EX` | 122,399 | 242,718 | 0.50x | 0.407 | 0.111 |
-| `GET` | 176,056 | 237,530 | 0.74x | 0.279 | 0.111 |
-| `DEL` | 172,414 | 240,964 | 0.72x | 0.287 | 0.111 |
-| `EXISTS` | 173,310 | 239,808 | 0.72x | 0.287 | 0.111 |
-| `EXPIRE` | 162,602 | 243,309 | 0.67x | 0.303 | 0.111 |
-| `TTL` | 176,367 | 239,808 | 0.74x | 0.279 | 0.111 |
-| `INFO` | 189,394 | 69,204 | 2.74x | 0.263 | 0.671 |
+| `PING` | 229,885 | 236,967 | 0.97x | 0.111 | 0.111 |
+| `ECHO` | 243,902 | 239,234 | 1.02x | 0.111 | 0.111 |
+| `SET` | 242,131 | 239,808 | 1.01x | 0.111 | 0.111 |
+| `SET EX` | 242,718 | 243,309 | 1.00x | 0.111 | 0.111 |
+| `GET` | 244,499 | 239,234 | 1.02x | 0.111 | 0.111 |
+| `DEL` | 246,305 | 240,385 | 1.02x | 0.111 | 0.111 |
+| `EXISTS` | 243,309 | 239,234 | 1.02x | 0.111 | 0.111 |
+| `EXPIRE` | 242,718 | 240,964 | 1.01x | 0.111 | 0.111 |
+| `TTL` | 244,499 | 240,964 | 1.01x | 0.111 | 0.111 |
+| `INFO` | 241,546 | 68,120 | 3.55x | 0.111 | 0.687 |
 
-Average throughput excluding `INFO` was 166,617 requests/second for this server and 240,078 requests/second for Redis, or about 69% of Redis throughput across the comparable command set.
+Average throughput excluding `INFO` was 242,219 requests/second for this server and 240,011 requests/second for Redis, or about 101% of Redis throughput across the comparable command set.
 
-`INFO` is not a fair throughput win because this server returns a small custom metadata payload while Redis returns a much larger response. The benchmark also measures the current implementation as-is, including hot-path debug logging calls whose output was redirected during the run.
+`INFO` is not a fair throughput win because this server returns a small custom metadata payload while Redis returns a much larger response. The comparable commands are also close to the local `redis-benchmark`/localhost ceiling on this machine, so small differences around 240,000 requests/second should not be over-interpreted.
+
+### Interesting Notes
+
+An earlier run of this same benchmark measured the server with several `println!` calls still present on the connection and request paths. Those calls printed accepted/disconnected clients, raw socket reads, and parsed RESP values. Even when stdout was redirected away from the terminal, Rust still had to format those values, lock stdout, and perform the writes.
+
+Removing those hot-path prints changed the result much more than any data-structure optimization in this workload:
+
+| Command | Previous req/s | Latest req/s | Change |
+| --- | ---: | ---: | ---: |
+| `PING` | 196,464 | 229,885 | +17% |
+| `ECHO` | 185,529 | 243,902 | +31% |
+| `SET` | 134,409 | 242,131 | +80% |
+| `SET EX` | 122,399 | 242,718 | +98% |
+| `GET` | 176,056 | 244,499 | +39% |
+| `DEL` | 172,414 | 246,305 | +43% |
+| `EXISTS` | 173,310 | 243,309 | +40% |
+| `EXPIRE` | 162,602 | 242,718 | +49% |
+| `TTL` | 176,367 | 244,499 | +39% |
+
+Across the comparable commands, average throughput improved from 166,617 to 242,219 requests/second, a 45% increase. The main lesson is that logging in a hot path is still work, even if the output is discarded later.
 
 ## What This Demonstrates
 
