@@ -52,7 +52,7 @@ cargo test
 cargo run
 ```
 
-By default the server listens on `127.0.0.1:6379` and stores append-only persistence data in `db.aof`.
+By default the server listens on `127.0.0.1:6379`. Append-only persistence is available but disabled by default.
 
 In another terminal, connect with `redis-cli`:
 
@@ -83,16 +83,22 @@ Listen on a different address:
 cargo run -- --host 127.0.0.1 --port 6380
 ```
 
+Enable append-only persistence:
+
+```sh
+cargo run -- --aof-enabled
+```
+
 Use a custom AOF file:
 
 ```sh
-cargo run -- --aof-path ./data/db.aof
+cargo run -- --aof-enabled --aof-path ./data/db.aof
 ```
 
 Use `everysec` fsync behavior:
 
 ```sh
-cargo run -- --aof-fsync-policy everysec
+cargo run -- --aof-enabled --aof-fsync-policy everysec
 ```
 
 Available CLI options:
@@ -110,7 +116,7 @@ Options:
   -V, --version                              Print version
 ```
 
-AOF is enabled by default in the current CLI configuration.
+AOF is disabled by default in the current CLI configuration. Pass `--aof-enabled` to enable append-only persistence.
 
 ## Command Support
 
@@ -243,6 +249,41 @@ The suite currently covers:
 - Eviction policies and out-of-memory responses.
 
 At the time this README was written, the test suite contains 168 tests.
+
+## Benchmarks
+
+I benchmarked this server against the official `redis-server` using the same client, command mix, and request profile.
+
+Benchmark setup:
+
+- Date: June 1, 2026.
+- Machine: Apple M4, 10 CPU cores, 24 GB memory.
+- OS: macOS Darwin 25.5.0.
+- Client: `redis-benchmark`.
+- Official Redis: `redis-server` v8.6.3.
+- Workload: 100,000 requests per command, 50 concurrent clients, no pipelining.
+- Persistence: disabled for both servers.
+- Transport: localhost TCP.
+- Build: this project built with `cargo build --release`.
+
+Results:
+
+| Command | This server req/s | redis-server req/s | This / Redis | This p50 ms | Redis p50 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `PING` | 196,464 | 239,808 | 0.82x | 0.255 | 0.111 |
+| `ECHO` | 185,529 | 238,095 | 0.78x | 0.271 | 0.111 |
+| `SET` | 134,409 | 238,663 | 0.56x | 0.367 | 0.111 |
+| `SET EX` | 122,399 | 242,718 | 0.50x | 0.407 | 0.111 |
+| `GET` | 176,056 | 237,530 | 0.74x | 0.279 | 0.111 |
+| `DEL` | 172,414 | 240,964 | 0.72x | 0.287 | 0.111 |
+| `EXISTS` | 173,310 | 239,808 | 0.72x | 0.287 | 0.111 |
+| `EXPIRE` | 162,602 | 243,309 | 0.67x | 0.303 | 0.111 |
+| `TTL` | 176,367 | 239,808 | 0.74x | 0.279 | 0.111 |
+| `INFO` | 189,394 | 69,204 | 2.74x | 0.263 | 0.671 |
+
+Average throughput excluding `INFO` was 166,617 requests/second for this server and 240,078 requests/second for Redis, or about 69% of Redis throughput across the comparable command set.
+
+`INFO` is not a fair throughput win because this server returns a small custom metadata payload while Redis returns a much larger response. The benchmark also measures the current implementation as-is, including hot-path debug logging calls whose output was redirected during the run.
 
 ## What This Demonstrates
 
