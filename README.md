@@ -268,18 +268,18 @@ Benchmark setup:
 
 Results:
 
-| Command | This server req/s | redis-server req/s | This / Redis | This p50 ms | Redis p50 ms |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `PING` | 230,947 | 238,095 | 0.97x | 0.111 | 0.111 |
-| `ECHO` | 245,700 | 238,663 | 1.03x | 0.111 | 0.111 |
-| `SET` | 244,499 | 241,546 | 1.01x | 0.111 | 0.111 |
-| `SET EX` | 244,499 | 243,309 | 1.00x | 0.111 | 0.111 |
-| `GET` | 244,499 | 239,234 | 1.02x | 0.111 | 0.111 |
-| `DEL` | 246,305 | 239,808 | 1.03x | 0.111 | 0.111 |
-| `EXISTS` | 246,305 | 240,964 | 1.02x | 0.111 | 0.111 |
-| `EXPIRE` | 245,098 | 242,718 | 1.01x | 0.111 | 0.111 |
-| `TTL` | 242,718 | 240,385 | 1.01x | 0.111 | 0.111 |
-| `INFO` | 240,385 | 68,353 | 3.52x | 0.111 | 0.679 |
+| Command | This server req/s | redis-server req/s | This / Redis |
+| --- | ---: | ---: | ---: |
+| `PING` | 230,947 | 238,095 | 0.97x |
+| `ECHO` | 245,700 | 238,663 | 1.03x |
+| `SET` | 244,499 | 241,546 | 1.01x |
+| `SET EX` | 244,499 | 243,309 | 1.00x |
+| `GET` | 244,499 | 239,234 | 1.02x |
+| `DEL` | 246,305 | 239,808 | 1.03x |
+| `EXISTS` | 246,305 | 240,964 | 1.02x |
+| `EXPIRE` | 245,098 | 242,718 | 1.01x |
+| `TTL` | 242,718 | 240,385 | 1.01x |
+| `INFO` | 240,385 | 68,353 | 3.52x |
 
 Average throughput excluding `INFO` was 243,397 requests/second for this server and 240,525 requests/second for Redis, or about 101% of Redis throughput across the comparable command set.
 
